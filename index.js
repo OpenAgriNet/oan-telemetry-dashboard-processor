@@ -1,0 +1,394 @@
+/**
+ * Telemetry Log Processor Microservice
+ * 
+ * This service processes telemetry logs from PostgreSQL database
+ * - Extracts configurable event types and stores in respective tables
+ * - Updates sync_status after processing
+ * - Runs every 5 minutes processing configurable batch size
+ */
+
+const express = require('express');
+const { Pool } = require('pg');
+const cron = require('node-cron');
+const dotenv = require('dotenv');
+const logger = require('./logger');
+const { eventProcessors, loadEventProcessors } = require('./eventProcessors');
+
+// Load environment variables from .env file
+dotenv.config();
+
+// Create Express application
+const app = express();
+app.use(express.json());
+
+const PORT = process.env.PORT || 3000;
+const BATCH_SIZE = process.env.BATCH_SIZE || 10;
+const CRON_SCHEDULE = process.env.CRON_SCHEDULE || '*/5 * * * *';
+
+// PostgreSQL connection pool
+const pool = new Pool({
+  user: process.env.DB_USER || 'postgres',
+  host: process.env.DB_HOST || 'localhost',
+  database: process.env.DB_NAME || 'telemetry',
+  password: process.env.DB_PASSWORD || 'postgres',
+  port: process.env.DB_PORT || 5432,
+});
+
+// Ensure necessary tables exist
+async function ensureTablesExist() {
+  const client = await pool.connect();
+  try {
+    // Create winston_logs table if not exists
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.winston_logs (
+        level character varying COLLATE pg_catalog."default",
+        message character varying COLLATE pg_catalog."default",
+        meta json,
+        "timestamp" timestamp without time zone DEFAULT now(),
+        sync_status integer DEFAULT 0
+      )
+    `);
+
+    // Create questions table if not exists
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.questions (
+        id SERIAL PRIMARY KEY,
+        uid VARCHAR,
+        sid VARCHAR,
+        group_details JSONB,
+        channel VARCHAR,
+        ets BIGINT,
+        question_text TEXT,
+        question_source VARCHAR,
+        answer_text JSONB,
+        answer TEXT,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    // Create feedback table if not exists
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.feedback (
+        id SERIAL PRIMARY KEY,
+        uid VARCHAR,
+        sid VARCHAR,
+        group_details JSONB,
+        channel VARCHAR,
+        ets BIGINT,
+        feedback_text TEXT,
+        session_id VARCHAR,
+        question_text TEXT,
+        answer_text TEXT,
+        feedback_type VARCHAR,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    // Create event_processors table if not exists
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.event_processors (
+        id SERIAL PRIMARY KEY,
+        event_type VARCHAR NOT NULL UNIQUE,
+        table_name VARCHAR NOT NULL,
+        field_mappings JSONB NOT NULL,
+        is_active BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    // Insert default event processors if they don't exist
+    await client.query(`
+      INSERT INTO public.event_processors (event_type, table_name, field_mappings)
+      VALUES 
+        ('OE_ITEM_RESPONSE', 'questions', '{
+          "uid": "uid",
+          "sid": "sid",
+          "groupDetails": "edata.eks.target.questionsDetails.groupDetails",
+          "channel": "channel",
+          "ets": "ets",
+          "questionText": "edata.eks.target.questionsDetails.questionText",
+          "questionSource": "edata.eks.target.questionsDetails.questionSource",
+          "answerText": "edata.eks.target.questionsDetails.answerText",
+          "answer": "edata.eks.target.questionsDetails.answerText.answer"
+        }')
+      ON CONFLICT (event_type) DO NOTHING;
+    `);
+
+    await client.query(`
+      INSERT INTO public.event_processors (event_type, table_name, field_mappings)
+      VALUES 
+        ('Feedback', 'feedback', '{
+          "uid": "uid",
+          "sid": "sid",
+          "groupDetails": "edata.eks.groupDetails",
+          "channel": "channel",
+          "ets": "ets",
+          "feedbackText": "edata.eks.feedbackText",
+          "sessionId": "edata.eks.sessionId",
+          "questionText": "edata.eks.questionText",
+          "answerText": "edata.eks.answerText",
+          "feedbackType": "edata.eks.feedbackType"
+        }')
+      ON CONFLICT (event_type) DO NOTHING;
+    `);
+
+    logger.info('Database tables verified and created if needed');
+  } catch (err) {
+    logger.error('Error ensuring tables exist:', err);
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// Parse telemetry message JSON
+function parseTelemetryMessage(message) {
+  try {
+    // Parse the message string which is a JSON string
+    const parsedMessage = JSON.parse(message);
+    // Return the events array from the parsed message
+    return parsedMessage.events || [];
+  } catch (err) {
+    logger.error('Error parsing telemetry message:', err);
+    return [];
+  }
+}
+
+// Process telemetry logs
+async function processTelemetryLogs() {
+  const client = await pool.connect();
+  try {
+    // Begin transaction
+    await client.query('BEGIN');
+
+    // Get unprocessed logs
+    const result = await client.query(
+      `SELECT * FROM winston_logs 
+       WHERE sync_status = 0 
+       ORDER BY "timestamp" ASC 
+       LIMIT $1`,
+      [BATCH_SIZE]
+    );
+
+    if (result.rows.length === 0) {
+      logger.info('No new telemetry logs to process');
+      await client.query('COMMIT');
+      return { processed: 0, status: 'success' };
+    }
+
+    logger.info(`Processing ${result.rows.length} telemetry logs`);
+
+    // Process each log
+    for (const log of result.rows) {
+      const events = parseTelemetryMessage(log.message);
+
+      for (const event of events) {
+        const eventType = event.eid;
+        
+        // Check if we have a processor for this event type
+        if (eventProcessors[eventType]) {
+          await eventProcessors[eventType](client, event);
+          logger.info(`Processed event type: ${eventType}`);
+        } else {
+          logger.debug(`No processor defined for event type: ${eventType}`);
+        }
+      }
+
+      // Update sync status for processed log
+      await client.query(
+        'UPDATE winston_logs SET sync_status = 1 WHERE "timestamp" = $1 AND message = $2',
+        [log.timestamp, log.message]
+      );
+    }
+
+    // Commit transaction
+    await client.query('COMMIT');
+    logger.info(`Successfully processed ${result.rows.length} telemetry logs`);
+    return { processed: result.rows.length, status: 'success' };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    logger.error('Error processing telemetry logs:', err);
+    return { processed: 0, status: 'error', error: err.message };
+  } finally {
+    client.release();
+  }
+}
+
+// Process OE_ITEM_RESPONSE data
+async function processQuestionData(client, event) {
+  try {
+    // Extract required fields
+    const uid = event.uid;
+    const sid = event.sid;
+    const groupDetails = event.edata?.eks?.target?.questionsDetails?.groupDetails || [];
+    const channel = event.channel;
+    const ets = event.ets;
+    const questionText = event.edata?.eks?.target?.questionsDetails?.questionText;
+    const questionSource = event.edata?.eks?.target?.questionsDetails?.questionSource;
+    const answerText = event.edata?.eks?.target?.questionsDetails?.answerText;
+    const answer = answerText?.answer;
+
+    // Insert data into questions table
+    await client.query(
+      `INSERT INTO questions (
+        uid, sid, group_details, channel, ets, 
+        question_text, question_source, answer_text, answer
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [
+        uid, sid, JSON.stringify(groupDetails), channel, ets,
+        questionText, questionSource, JSON.stringify(answerText), answer
+      ]
+    );
+
+    logger.info(`Processed question data for uid: ${uid}, question: ${questionText?.substring(0, 30)}...`);
+  } catch (err) {
+    logger.error('Error processing question data:', err);
+    throw err;
+  }
+}
+
+// Process Feedback data
+async function processFeedbackData(client, event) {
+  try {
+    // Extract required fields
+    const uid = event.uid;
+    const sid = event.sid;
+    const groupDetails = event.edata?.eks?.groupDetails || [];
+    const channel = event.channel;
+    const ets = event.ets;
+    const feedbackText = event.edata?.eks?.feedbackText;
+    const sessionId = event.edata?.eks?.sessionId;
+    const questionText = event.edata?.eks?.questionText;
+    const answerText = event.edata?.eks?.answerText;
+    const feedbackType = event.edata?.eks?.feedbackType;
+
+    // Insert data into feedback table
+    await client.query(
+      `INSERT INTO feedback (
+        uid, sid, group_details, channel, ets,
+        feedback_text, session_id, question_text, 
+        answer_text, feedback_type
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [
+        uid, sid, JSON.stringify(groupDetails), channel, ets,
+        feedbackText, sessionId, questionText,
+        answerText, feedbackType
+      ]
+    );
+
+    logger.info(`Processed feedback data for uid: ${uid}, feedback type: ${feedbackType}`);
+  } catch (err) {
+    logger.error('Error processing feedback data:', err);
+    throw err;
+  }
+}
+
+// Schedule telemetry processing with configurable cron schedule
+cron.schedule(CRON_SCHEDULE, async () => {
+  logger.info(`Running scheduled telemetry log processing (${CRON_SCHEDULE})`);
+  await processTelemetryLogs();
+});
+
+// API endpoint to manually trigger processing
+app.post('/api/process-logs', async (req, res) => {
+  try {
+    const result = await processTelemetryLogs();
+    res.status(200).json({ 
+      message: 'Telemetry log processing triggered successfully',
+      ...result
+    });
+  } catch (err) {
+    logger.error('Error triggering telemetry log processing:', err);
+    res.status(500).json({ error: 'Failed to process telemetry logs', details: err.message });
+  }
+});
+
+// API endpoint to get configured event processors
+app.get('/api/event-processors', (req, res) => {
+  const processors = Object.keys(eventProcessors).map(eventType => ({
+    eventType,
+    isActive: true
+  }));
+  
+  res.status(200).json({ processors });
+});
+
+// API endpoint to register a new event processor configuration
+app.post('/api/event-processors', async (req, res) => {
+  try {
+    const { eventType, tableName, fieldMappings } = req.body;
+    
+    if (!eventType || !tableName || !fieldMappings) {
+      return res.status(400).json({ 
+        error: 'Missing required parameters: eventType, tableName, and fieldMappings are required' 
+      });
+    }
+    
+    // Register the new event processor configuration
+    const result = await loadEventProcessors.registerEventProcessor(eventType, tableName, fieldMappings);
+    
+    res.status(201).json({ 
+      message: 'Event processor registered successfully',
+      eventType,
+      tableName,
+      ...result
+    });
+  } catch (err) {
+    logger.error('Error registering event processor:', err);
+    res.status(500).json({ error: 'Failed to register event processor', details: err.message });
+  }
+});
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'UP',
+    version: process.env.npm_package_version || '1.0.0',
+    eventProcessors: Object.keys(eventProcessors).length
+  });
+});
+
+// Start server
+async function startServer() {
+  try {
+    // Ensure database tables exist
+    await ensureTablesExist();
+    
+    // Load configured event processors
+    await loadEventProcessors.loadFromDatabase(pool);
+    
+    // Start Express server
+    const server = app.listen(PORT, () => {
+      logger.info(`Telemetry log processor service started on port ${PORT}`);
+    });
+    
+    // Run initial processing
+    await processTelemetryLogs();
+    
+    return server;
+  } catch (err) {
+    logger.error('Failed to start server:', err);
+    process.exit(1);
+  }
+}
+
+// Handle shutdown gracefully
+process.on('SIGTERM', () => {
+  logger.info('SIGTERM received, shutting down gracefully');
+  pool.end();
+  process.exit(0);
+});
+
+// Export for testing
+module.exports = {
+  app,
+  startServer,
+  processTelemetryLogs,
+  ensureTablesExist,
+  parseTelemetryMessage
+};
+
+// Only start server if this file is run directly (not when required in tests)
+if (require.main === module) {
+  startServer();

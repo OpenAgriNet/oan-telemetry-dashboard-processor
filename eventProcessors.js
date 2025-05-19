@@ -8,7 +8,7 @@ const logger = require('./logger');
 const _ = require('lodash');
 
 // Event processor registry
-const eventProcessors = {};
+let eventProcessors = [];
 
 /**
  * Get a nested property from an object using dot notation path
@@ -35,14 +35,18 @@ async function loadFromDatabase(pool) {
     
     // Clear existing processors
     Object.keys(eventProcessors).forEach(key => delete eventProcessors[key]);
-    
+    //eventProcessors = [];
     // Register each processor from database
     for (const row of result.rows) {
-      registerProcessor(row.event_type, row.table_name, row.field_mappings);
+      console.log(row);
+      registerProcessor(row.id,row.event_type, row.table_name, row.field_mappings, row.field_verification);
     }
+
+    console.log(eventProcessors);
     
     logger.info(`Loaded ${result.rows.length} event processors from database`);
   } catch (err) {
+    console.error(err);
     logger.error('Error loading event processors from database:', err);
     throw err;
   } finally {
@@ -145,14 +149,21 @@ async function ensureTableExists(client, tableName, fieldMappings) {
  * @param {String} tableName - The target table name
  * @param {Object} fieldMappings - Mapping of table columns to event data paths
  */
-function registerProcessor(eventType, tableName, fieldMappings) {
-  eventProcessors[eventType] = async (client, event) => {
+function registerProcessor(id,eventType, tableName, fieldMappings, fieldVerification) {
+  let eventProcessorsData = {};
+  eventProcessorsData["id"] = id;
+  eventProcessorsData["eventType"] = eventType;
+  eventProcessorsData["tableName"] = tableName;
+  eventProcessorsData["fieldVerification"] = fieldVerification;
+  eventProcessorsData["process"] = async (client, event) => {
     try {
       // Extract field values using mappings
       const fields = [];
       const values = [];
       const placeholders = [];
       let paramIndex = 1;
+
+      //
       
       Object.entries(fieldMappings).forEach(([field, path]) => {
         fields.push(field.toLowerCase());
@@ -160,6 +171,7 @@ function registerProcessor(eventType, tableName, fieldMappings) {
         values.push((typeof value === 'object' && value !== null) ? JSON.stringify(value) : value);
         placeholders.push(`$${paramIndex++}`);
       });
+
       
       // Construct the SQL query
       const query = `
@@ -175,10 +187,12 @@ function registerProcessor(eventType, tableName, fieldMappings) {
       throw err;
     }
   };
+  eventProcessors.push(eventProcessorsData);
 }
 
 module.exports = {
   eventProcessors,
+  getNestedValue,
   loadEventProcessors: {
     loadFromDatabase,
     registerEventProcessor

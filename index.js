@@ -12,7 +12,8 @@ const { Pool } = require('pg');
 const cron = require('node-cron');
 const dotenv = require('dotenv');
 const logger = require('./logger');
-const { eventProcessors, loadEventProcessors } = require('./eventProcessors');
+const { eventProcessors, loadEventProcessors, getNestedValue } = require('./eventProcessors');
+const { forEach } = require('lodash');
 
 // Load environment variables from .env file
 dotenv.config();
@@ -49,19 +50,43 @@ async function ensureTablesExist() {
       )
     `);
 
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.dead_letter_logs (
+        level character varying COLLATE pg_catalog."default",
+        event_name character varying COLLATE pg_catalog."default",
+        message character varying COLLATE pg_catalog."default",
+        meta json,
+        "timestamp" timestamp without time zone DEFAULT now(),
+        sync_status integer DEFAULT 0
+      )
+    `);
+
     // Create questions table if not exists
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.questions (
         id SERIAL PRIMARY KEY,
         uid VARCHAR,
         sid VARCHAR,
-        group_details JSONB,
+        groupdetails TEXT,
         channel VARCHAR,
         ets BIGINT,
-        question_text TEXT,
-        question_source VARCHAR,
-        answer_text JSONB,
+        questiontext TEXT,
+        questionsource VARCHAR,
+        answertext TEXT,
         answer TEXT,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.errorDetails (
+        id SERIAL PRIMARY KEY,
+        uid VARCHAR,
+        sid VARCHAR,
+        groupdetails TEXT,
+        channel VARCHAR,
+        ets BIGINT,
+        errorText TEXT,
         created_at TIMESTAMP DEFAULT NOW()
       )
     `);
@@ -72,14 +97,13 @@ async function ensureTablesExist() {
         id SERIAL PRIMARY KEY,
         uid VARCHAR,
         sid VARCHAR,
-        group_details JSONB,
+        groupdetails JSONB,
         channel VARCHAR,
         ets BIGINT,
-        feedback_text TEXT,
-        session_id VARCHAR,
-        question_text TEXT,
-        answer_text TEXT,
-        feedback_type VARCHAR,
+        feedbackText TEXT,
+        questionText TEXT,
+        answerText TEXT,
+        feedbackType TEXT,
         created_at TIMESTAMP DEFAULT NOW()
       )
     `);
@@ -88,8 +112,9 @@ async function ensureTablesExist() {
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.event_processors (
         id SERIAL PRIMARY KEY,
-        event_type VARCHAR NOT NULL UNIQUE,
-        table_name VARCHAR NOT NULL,
+        event_type VARCHAR NOT NULL,
+        table_name VARCHAR NOT NULL UNIQUE,
+        field_verification VARCHAR NOT NULL,
         field_mappings JSONB NOT NULL,
         is_active BOOLEAN DEFAULT TRUE,
         created_at TIMESTAMP DEFAULT NOW(),
@@ -99,7 +124,7 @@ async function ensureTablesExist() {
 
     // Insert default event processors if they don't exist
     await client.query(`
-      INSERT INTO public.event_processors (event_type, table_name, field_mappings)
+      INSERT INTO public.event_processors (event_type, table_name, field_mappings, field_verification)
       VALUES 
         ('OE_ITEM_RESPONSE', 'questions', '{
           "uid": "uid",
@@ -111,28 +136,60 @@ async function ensureTablesExist() {
           "questionSource": "edata.eks.target.questionsDetails.questionSource",
           "answerText": "edata.eks.target.questionsDetails.answerText",
           "answer": "edata.eks.target.questionsDetails.answerText.answer"
-        }')
-      ON CONFLICT (event_type) DO NOTHING;
+        }','edata.eks.target.questionsDetails')
+      ON CONFLICT (table_name) DO NOTHING;
+    `);
+
+     await client.query(`
+      INSERT INTO public.event_processors (event_type, table_name, field_mappings, field_verification)
+      VALUES 
+        ('OE_ITEM_RESPONSE', 'errorDetails', '{
+          "uid": "uid",
+          "sid": "sid",
+          "channel": "channel",
+          "ets": "ets",
+          "errorText": "edata.eks.target.errorDetails.errorText"
+        }','edata.eks.target.errorDetails')
+      ON CONFLICT (table_name) DO NOTHING;
     `);
 
     await client.query(`
-      INSERT INTO public.event_processors (event_type, table_name, field_mappings)
+      INSERT INTO public.event_processors (event_type, table_name, field_mappings, field_verification)
       VALUES 
-        ('Feedback', 'feedback', '{
+        ('OE_ITEM_RESPONSE', 'feedback', '{
           "uid": "uid",
           "sid": "sid",
-          "groupDetails": "edata.eks.groupDetails",
+          "groupDetails": "edata.eks.target.questionsDetails.groupDetails",
           "channel": "channel",
           "ets": "ets",
-          "feedbackText": "edata.eks.feedbackText",
-          "sessionId": "edata.eks.sessionId",
-          "questionText": "edata.eks.questionText",
-          "answerText": "edata.eks.answerText",
-          "feedbackType": "edata.eks.feedbackType"
-        }')
-      ON CONFLICT (event_type) DO NOTHING;
+          "feedbackText": "edata.eks.target.feedbackDetails.feedbackText",
+          "questionText": "edata.eks.target.feedbackDetails.questionText",
+          "answerText": "edata.eks.target.feedbackDetails.answerText",
+          "feedbackType": "edata.eks.target.feedbackDetails.feedbackType"
+        }','edata.eks.target.feedbackDetails')
+      ON CONFLICT (table_name) DO NOTHING;
     `);
 
+
+    /*
+        await client.query(`
+          INSERT INTO public.event_processors (event_type, table_name, field_mappings)
+          VALUES 
+            ('Feedback', 'feedback', '{
+              "uid": "uid",
+              "sid": "sid",
+              "groupDetails": "edata.eks.groupDetails",
+              "channel": "channel",
+              "ets": "ets",
+              "feedbackText": "edata.eks.feedbackText",
+              "sessionId": "edata.eks.sessionId",
+              "questionText": "edata.eks.questionText",
+              "answerText": "edata.eks.answerText",
+              "feedbackType": "edata.eks.feedbackType"
+            }')
+          ON CONFLICT (event_type) DO NOTHING;
+        `);
+    */
     logger.info('Database tables verified and created if needed');
   } catch (err) {
     logger.error('Error ensuring tables exist:', err);
@@ -164,13 +221,12 @@ async function processTelemetryLogs() {
 
     // Get unprocessed logs
     const result = await client.query(
-      `SELECT * FROM winston_logs 
+      `SELECT  level, message, meta, cast(to_char(("timestamp")::TIMESTAMP,'yyyymmddhhmiss') as BigInt) as timestamp, sync_status FROM winston_logs 
        WHERE sync_status = 0 
        ORDER BY "timestamp" ASC 
        LIMIT $1`,
       [BATCH_SIZE]
     );
-
     if (result.rows.length === 0) {
       logger.info('No new telemetry logs to process');
       await client.query('COMMIT');
@@ -183,21 +239,34 @@ async function processTelemetryLogs() {
     for (const log of result.rows) {
       const events = parseTelemetryMessage(log.message);
 
+      //console.log(JSON.stringify(eventProcessors));
       for (const event of events) {
         const eventType = event.eid;
-        
-        // Check if we have a processor for this event type
-        if (eventProcessors[eventType]) {
-          await eventProcessors[eventType](client, event);
-          logger.info(`Processed event type: ${eventType}`);
-        } else {
-          logger.debug(`No processor defined for event type: ${eventType}`);
+        let eventProssed = false;
+        forEach(eventProcessors, async (processor, key) => {
+          const verified = getNestedValue(event, processor["fieldVerification"]);
+          if (processor['eventType'] === eventType && verified !== undefined && !eventProssed) {
+            eventProssed = true;
+            await processor["process"](client, event);
+            // Come out of the loop if we find a matching processo
+            //logger.info(`Processed event type: ${eventType}`);
+          }
+        });
+        if (eventType !== 'OE_END' && eventType !== 'OE_START' && eventProssed === false) {
+              logger.debug(`No processor defined for event type: ${eventType}`);
+              await client.query(
+                `Insert into dead_letter_logs(level,message, meta, event_name) values ($1, $2, $3, $4)`,
+                [log.level, event, log.meta, eventType]
+              );
         }
-      }
+        // Check if we have a processor for this event type
 
+      }
       // Update sync status for processed log
+      //console.log(`Updating sync status for log with timestamp: ${log.timestamp}`);
+      //console.log(`select * from winston_logs WHERE "timestamp" = ${log.timestamp} AND message = ${log.message}`);
       await client.query(
-        'UPDATE winston_logs SET sync_status = 1 WHERE "timestamp" = $1 AND message = $2',
+        `UPDATE winston_logs SET sync_status = 1 WHERE cast(to_char(("timestamp")::TIMESTAMP,'yyyymmddhhmiss') as BigInt) = $1  AND message = $2`,
         [log.timestamp, log.message]
       );
     }
@@ -294,7 +363,7 @@ cron.schedule(CRON_SCHEDULE, async () => {
 app.post('/api/process-logs', async (req, res) => {
   try {
     const result = await processTelemetryLogs();
-    res.status(200).json({ 
+    res.status(200).json({
       message: 'Telemetry log processing triggered successfully',
       ...result
     });
@@ -310,7 +379,7 @@ app.get('/api/event-processors', (req, res) => {
     eventType,
     isActive: true
   }));
-  
+
   res.status(200).json({ processors });
 });
 
@@ -318,17 +387,17 @@ app.get('/api/event-processors', (req, res) => {
 app.post('/api/event-processors', async (req, res) => {
   try {
     const { eventType, tableName, fieldMappings } = req.body;
-    
+
     if (!eventType || !tableName || !fieldMappings) {
-      return res.status(400).json({ 
-        error: 'Missing required parameters: eventType, tableName, and fieldMappings are required' 
+      return res.status(400).json({
+        error: 'Missing required parameters: eventType, tableName, and fieldMappings are required'
       });
     }
-    
+
     // Register the new event processor configuration
     const result = await loadEventProcessors.registerEventProcessor(eventType, tableName, fieldMappings);
-    
-    res.status(201).json({ 
+
+    res.status(201).json({
       message: 'Event processor registered successfully',
       eventType,
       tableName,
@@ -342,7 +411,7 @@ app.post('/api/event-processors', async (req, res) => {
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.status(200).json({ 
+  res.status(200).json({
     status: 'UP',
     version: process.env.npm_package_version || '1.0.0',
     eventProcessors: Object.keys(eventProcessors).length
@@ -354,18 +423,18 @@ async function startServer() {
   try {
     // Ensure database tables exist
     await ensureTablesExist();
-    
+
     // Load configured event processors
     await loadEventProcessors.loadFromDatabase(pool);
-    
+
     // Start Express server
     const server = app.listen(PORT, () => {
       logger.info(`Telemetry log processor service started on port ${PORT}`);
     });
-    
+
     // Run initial processing
     await processTelemetryLogs();
-    
+
     return server;
   } catch (err) {
     logger.error('Failed to start server:', err);
@@ -392,3 +461,6 @@ module.exports = {
 // Only start server if this file is run directly (not when required in tests)
 if (require.main === module) {
   startServer();
+}
+
+module.exports = { app, pool };

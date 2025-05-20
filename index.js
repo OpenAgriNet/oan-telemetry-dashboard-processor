@@ -39,16 +39,6 @@ const pool = new Pool({
 async function ensureTablesExist() {
   const client = await pool.connect();
   try {
-    // Create winston_logs table if not exists
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS public.winston_logs (
-        level character varying COLLATE pg_catalog."default",
-        message character varying COLLATE pg_catalog."default",
-        meta json,
-        "timestamp" timestamp without time zone DEFAULT now(),
-        sync_status integer DEFAULT 0
-      )
-    `);
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.dead_letter_logs (

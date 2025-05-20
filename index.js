@@ -64,7 +64,7 @@ async function ensureTablesExist() {
     // Create questions table if not exists
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.questions (
-        id SERIAL PRIMARY KEY,
+        id UUID DEFAULT gen_random_uuid(),
         uid VARCHAR,
         sid VARCHAR,
         groupdetails TEXT,
@@ -80,12 +80,13 @@ async function ensureTablesExist() {
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.errorDetails (
-        id SERIAL PRIMARY KEY,
+        id UUID DEFAULT gen_random_uuid(),
         uid VARCHAR,
         sid VARCHAR,
         groupdetails TEXT,
         channel VARCHAR,
         ets BIGINT,
+        qid VARCHAR,
         errorText TEXT,
         created_at TIMESTAMP DEFAULT NOW()
       )
@@ -94,7 +95,7 @@ async function ensureTablesExist() {
     // Create feedback table if not exists
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.feedback (
-        id SERIAL PRIMARY KEY,
+        id UUID DEFAULT gen_random_uuid(),
         uid VARCHAR,
         sid VARCHAR,
         groupdetails JSONB,
@@ -103,6 +104,7 @@ async function ensureTablesExist() {
         feedbackText TEXT,
         questionText TEXT,
         answerText TEXT,
+        qid VARCHAR,
         feedbackType TEXT,
         created_at TIMESTAMP DEFAULT NOW()
       )
@@ -148,7 +150,8 @@ async function ensureTablesExist() {
           "sid": "sid",
           "channel": "channel",
           "ets": "ets",
-          "errorText": "edata.eks.target.errorDetails.errorText"
+          "errorText": "edata.eks.target.errorDetails.errorText",
+          "qid": "edata.eks.qid"
         }','edata.eks.target.errorDetails')
       ON CONFLICT (table_name) DO NOTHING;
     `);
@@ -165,7 +168,8 @@ async function ensureTablesExist() {
           "feedbackText": "edata.eks.target.feedbackDetails.feedbackText",
           "questionText": "edata.eks.target.feedbackDetails.questionText",
           "answerText": "edata.eks.target.feedbackDetails.answerText",
-          "feedbackType": "edata.eks.target.feedbackDetails.feedbackType"
+          "feedbackType": "edata.eks.target.feedbackDetails.feedbackType",
+          "qid": "edata.eks.qid"
         }','edata.eks.target.feedbackDetails')
       ON CONFLICT (table_name) DO NOTHING;
     `);

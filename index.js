@@ -6,7 +6,8 @@
  * - Updates sync_status after processing
  * - Runs every 5 minutes processing configurable batch size
  */
-
+const fs = require('fs');
+const path = require('path');
 const express = require('express');
 const { Pool } = require('pg');
 const cron = require('node-cron');

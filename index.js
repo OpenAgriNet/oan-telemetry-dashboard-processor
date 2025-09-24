@@ -57,15 +57,7 @@ async function ensureTablesExist() {
         message character varying COLLATE pg_catalog."default",
         meta json,
         "timestamp" timestamp without time zone DEFAULT now(),
-        sync_status integer DEFAULT 0,
-        mobile VARCHAR,
-        username VARCHAR,
-        email VARCHAR,
-        role VARCHAR,
-        farmer_id VARCHAR,
-        registered_location JSONB,
-        device_location JSONB,
-        agristack_location JSONB
+        sync_status integer DEFAULT 0
       )
     `);
 
@@ -94,6 +86,37 @@ async function ensureTablesExist() {
       )
     `);
 
+    // Add missing columns to questions table if they don't exist
+    await client.query(`
+      DO $$ 
+      BEGIN 
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='questions' AND column_name='mobile') THEN
+          ALTER TABLE public.questions ADD COLUMN mobile VARCHAR;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='questions' AND column_name='username') THEN
+          ALTER TABLE public.questions ADD COLUMN username VARCHAR;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='questions' AND column_name='email') THEN
+          ALTER TABLE public.questions ADD COLUMN email VARCHAR;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='questions' AND column_name='role') THEN
+          ALTER TABLE public.questions ADD COLUMN role VARCHAR;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='questions' AND column_name='farmer_id') THEN
+          ALTER TABLE public.questions ADD COLUMN farmer_id VARCHAR;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='questions' AND column_name='registered_location') THEN
+          ALTER TABLE public.questions ADD COLUMN registered_location JSONB;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='questions' AND column_name='device_location') THEN
+          ALTER TABLE public.questions ADD COLUMN device_location JSONB;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='questions' AND column_name='agristack_location') THEN
+          ALTER TABLE public.questions ADD COLUMN agristack_location JSONB;
+        END IF;
+      END $$;
+    `);
+
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.errorDetails (
         id UUID DEFAULT gen_random_uuid(),
@@ -114,6 +137,37 @@ async function ensureTablesExist() {
         agristack_location JSONB,
         created_at TIMESTAMP DEFAULT NOW()
       )
+    `);
+
+    // Add missing columns to errorDetails table if they don't exist
+    await client.query(`
+      DO $$ 
+      BEGIN 
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='errorDetails' AND column_name='mobile') THEN
+          ALTER TABLE public.errorDetails ADD COLUMN mobile VARCHAR;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='errorDetails' AND column_name='username') THEN
+          ALTER TABLE public.errorDetails ADD COLUMN username VARCHAR;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='errorDetails' AND column_name='email') THEN
+          ALTER TABLE public.errorDetails ADD COLUMN email VARCHAR;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='errorDetails' AND column_name='role') THEN
+          ALTER TABLE public.errorDetails ADD COLUMN role VARCHAR;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='errorDetails' AND column_name='farmer_id') THEN
+          ALTER TABLE public.errorDetails ADD COLUMN farmer_id VARCHAR;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='errorDetails' AND column_name='registered_location') THEN
+          ALTER TABLE public.errorDetails ADD COLUMN registered_location JSONB;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='errorDetails' AND column_name='device_location') THEN
+          ALTER TABLE public.errorDetails ADD COLUMN device_location JSONB;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='errorDetails' AND column_name='agristack_location') THEN
+          ALTER TABLE public.errorDetails ADD COLUMN agristack_location JSONB;
+        END IF;
+      END $$;
     `);
 
     // Create feedback table if not exists
@@ -140,6 +194,37 @@ async function ensureTablesExist() {
         agristack_location JSONB,
         created_at TIMESTAMP DEFAULT NOW()
       )
+    `);
+
+    // Add missing columns to feedback table if they don't exist
+    await client.query(`
+      DO $$ 
+      BEGIN 
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='feedback' AND column_name='mobile') THEN
+          ALTER TABLE public.feedback ADD COLUMN mobile VARCHAR;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='feedback' AND column_name='username') THEN
+          ALTER TABLE public.feedback ADD COLUMN username VARCHAR;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='feedback' AND column_name='email') THEN
+          ALTER TABLE public.feedback ADD COLUMN email VARCHAR;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='feedback' AND column_name='role') THEN
+          ALTER TABLE public.feedback ADD COLUMN role VARCHAR;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='feedback' AND column_name='farmer_id') THEN
+          ALTER TABLE public.feedback ADD COLUMN farmer_id VARCHAR;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='feedback' AND column_name='registered_location') THEN
+          ALTER TABLE public.feedback ADD COLUMN registered_location JSONB;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='feedback' AND column_name='device_location') THEN
+          ALTER TABLE public.feedback ADD COLUMN device_location JSONB;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='feedback' AND column_name='agristack_location') THEN
+          ALTER TABLE public.feedback ADD COLUMN agristack_location JSONB;
+        END IF;
+      END $$;
     `);
 
     // Create event_processors table if not exists
@@ -315,32 +400,9 @@ async function processTelemetryLogs() {
         if (eventType !== 'OE_END' && eventType !== 'OE_START' && eventProssed === false) {
               logger.debug(`No processor defined for event type: ${eventType}`);
               
-              // Construct location JSON objects for dead letter logs
-              const registeredLocation = {
-                district: event.registered_location_district || null,
-                village: event.registered_location_village || null,
-                taluka: event.registered_location_taluka || null
-              };
-              
-              const deviceLocation = {
-                district: event.device_location_district || null,
-                village: event.device_location_village || null,
-                taluka: event.device_location_taluka || null
-              };
-              
-              const agristackLocation = {
-                district: event.agristack_location_district || null,
-                village: event.agristack_location_village || null,
-                taluka: event.agristack_location_taluka || null
-              };
-              
               await client.query(
-                `Insert into dead_letter_logs(level,message, meta, event_name, mobile, username, email, role, farmer_id, registered_location, device_location, agristack_location) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-                [log.level, event, log.meta, eventType, 
-                 event.mobile, event.username, event.email, event.role, event.farmer_id,
-                 (registeredLocation.district || registeredLocation.village || registeredLocation.taluka) ? JSON.stringify(registeredLocation) : null,
-                 (deviceLocation.district || deviceLocation.village || deviceLocation.taluka) ? JSON.stringify(deviceLocation) : null,
-                 (agristackLocation.district || agristackLocation.village || agristackLocation.taluka) ? JSON.stringify(agristackLocation) : null]
+                `Insert into dead_letter_logs(level, message, meta, event_name) values ($1, $2, $3, $4)`,
+                [log.level, JSON.stringify(event), log.meta, eventType]
               );
         }
         // Check if we have a processor for this event type

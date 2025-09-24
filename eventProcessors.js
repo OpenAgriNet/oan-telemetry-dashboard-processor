@@ -167,7 +167,39 @@ function registerProcessor(id,eventType, tableName, fieldMappings, fieldVerifica
       
       Object.entries(fieldMappings).forEach(([field, path]) => {
         fields.push(field.toLowerCase());
-        const value = getNestedValue(event, path);
+        let value = getNestedValue(event, path);
+        
+        // Handle telemetry context fields that are not in individual events
+        // but are part of the telemetry configuration
+        const telemetryContextFields = ['mobile', 'username', 'email', 'role', 'farmer_id'];
+        const locationFields = ['registered_location', 'device_location', 'agristack_location'];
+        
+        if (telemetryContextFields.includes(path) || telemetryContextFields.includes(field.toLowerCase())) {
+          // These values would be available in the telemetry context
+          // For now, we'll extract from event if available, otherwise set to null
+          // In production, these would come from the telemetry context/configuration
+          value = getNestedValue(event, path) || event[path] || event[field] || null;
+        } 
+        // Handle location JSON formation
+        else if (locationFields.includes(field.toLowerCase())) {
+          // Construct JSON object for location data from individual district/village/taluka fields
+          // The telemetry sends: registered_location_district, registered_location_village, registered_location_taluka
+          const locationPrefix = field.toLowerCase(); // e.g., "registered_location"
+          value = {
+            district: event[`${locationPrefix}_district`] || 
+                     getNestedValue(event, `${locationPrefix}_district`) || null,
+            village: event[`${locationPrefix}_village`] || 
+                    getNestedValue(event, `${locationPrefix}_village`) || null,
+            taluka: event[`${locationPrefix}_taluka`] || 
+                   getNestedValue(event, `${locationPrefix}_taluka`) || null
+          };
+          
+          // If all location fields are null, set the entire value to null
+          if (!value.district && !value.village && !value.taluka) {
+            value = null;
+          }
+        }
+        
         values.push((typeof value === 'object' && value !== null) ? JSON.stringify(value) : value);
         placeholders.push(`$${paramIndex++}`);
       });

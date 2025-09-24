@@ -57,7 +57,15 @@ async function ensureTablesExist() {
         message character varying COLLATE pg_catalog."default",
         meta json,
         "timestamp" timestamp without time zone DEFAULT now(),
-        sync_status integer DEFAULT 0
+        sync_status integer DEFAULT 0,
+        mobile VARCHAR,
+        username VARCHAR,
+        email VARCHAR,
+        role VARCHAR,
+        farmer_id VARCHAR,
+        registered_location JSONB,
+        device_location JSONB,
+        agristack_location JSONB
       )
     `);
 
@@ -74,6 +82,14 @@ async function ensureTablesExist() {
         questionsource VARCHAR,
         answertext TEXT,
         answer TEXT,
+        mobile VARCHAR,
+        username VARCHAR,
+        email VARCHAR,
+        role VARCHAR,
+        farmer_id VARCHAR,
+        registered_location JSONB,
+        device_location JSONB,
+        agristack_location JSONB,
         created_at TIMESTAMP DEFAULT NOW()
       )
     `);
@@ -88,6 +104,14 @@ async function ensureTablesExist() {
         ets BIGINT,
         qid VARCHAR,
         errorText TEXT,
+        mobile VARCHAR,
+        username VARCHAR,
+        email VARCHAR,
+        role VARCHAR,
+        farmer_id VARCHAR,
+        registered_location JSONB,
+        device_location JSONB,
+        agristack_location JSONB,
         created_at TIMESTAMP DEFAULT NOW()
       )
     `);
@@ -106,6 +130,14 @@ async function ensureTablesExist() {
         answerText TEXT,
         qid VARCHAR,
         feedbackType TEXT,
+        mobile VARCHAR,
+        username VARCHAR,
+        email VARCHAR,
+        role VARCHAR,
+        farmer_id VARCHAR,
+        registered_location JSONB,
+        device_location JSONB,
+        agristack_location JSONB,
         created_at TIMESTAMP DEFAULT NOW()
       )
     `);
@@ -137,7 +169,15 @@ async function ensureTablesExist() {
           "questionText": "edata.eks.target.questionsDetails.questionText",
           "questionSource": "edata.eks.target.questionsDetails.questionSource",
           "answerText": "edata.eks.target.questionsDetails.answerText",
-          "answer": "edata.eks.target.questionsDetails.answerText.answer"
+          "answer": "edata.eks.target.questionsDetails.answerText.answer",
+          "mobile": "mobile",
+          "username": "username",
+          "email": "email",
+          "role": "role",
+          "farmer_id": "farmer_id",
+          "registered_location": "registered_location",
+          "device_location": "device_location",
+          "agristack_location": "agristack_location"
         }','edata.eks.target.questionsDetails')
       ON CONFLICT (table_name) DO NOTHING;
     `);
@@ -151,7 +191,15 @@ async function ensureTablesExist() {
           "channel": "channel",
           "ets": "ets",
           "errorText": "edata.eks.target.errorDetails.errorText",
-          "qid": "edata.eks.qid"
+          "qid": "edata.eks.qid",
+          "mobile": "mobile",
+          "username": "username",
+          "email": "email",
+          "role": "role",
+          "farmer_id": "farmer_id",
+          "registered_location": "registered_location",
+          "device_location": "device_location",
+          "agristack_location": "agristack_location"
         }','edata.eks.target.errorDetails')
       ON CONFLICT (table_name) DO NOTHING;
     `);
@@ -169,7 +217,15 @@ async function ensureTablesExist() {
           "questionText": "edata.eks.target.feedbackDetails.questionText",
           "answerText": "edata.eks.target.feedbackDetails.answerText",
           "feedbackType": "edata.eks.target.feedbackDetails.feedbackType",
-          "qid": "edata.eks.qid"
+          "qid": "edata.eks.qid",
+          "mobile": "mobile",
+          "username": "username",
+          "email": "email",
+          "role": "role",
+          "farmer_id": "farmer_id",
+          "registered_location": "registered_location",
+          "device_location": "device_location",
+          "agristack_location": "agristack_location"
         }','edata.eks.target.feedbackDetails')
       ON CONFLICT (table_name) DO NOTHING;
     `);
@@ -258,9 +314,33 @@ async function processTelemetryLogs() {
         });
         if (eventType !== 'OE_END' && eventType !== 'OE_START' && eventProssed === false) {
               logger.debug(`No processor defined for event type: ${eventType}`);
+              
+              // Construct location JSON objects for dead letter logs
+              const registeredLocation = {
+                district: event.registered_location_district || null,
+                village: event.registered_location_village || null,
+                taluka: event.registered_location_taluka || null
+              };
+              
+              const deviceLocation = {
+                district: event.device_location_district || null,
+                village: event.device_location_village || null,
+                taluka: event.device_location_taluka || null
+              };
+              
+              const agristackLocation = {
+                district: event.agristack_location_district || null,
+                village: event.agristack_location_village || null,
+                taluka: event.agristack_location_taluka || null
+              };
+              
               await client.query(
-                `Insert into dead_letter_logs(level,message, meta, event_name) values ($1, $2, $3, $4)`,
-                [log.level, event, log.meta, eventType]
+                `Insert into dead_letter_logs(level,message, meta, event_name, mobile, username, email, role, farmer_id, registered_location, device_location, agristack_location) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+                [log.level, event, log.meta, eventType, 
+                 event.mobile, event.username, event.email, event.role, event.farmer_id,
+                 (registeredLocation.district || registeredLocation.village || registeredLocation.taluka) ? JSON.stringify(registeredLocation) : null,
+                 (deviceLocation.district || deviceLocation.village || deviceLocation.taluka) ? JSON.stringify(deviceLocation) : null,
+                 (agristackLocation.district || agristackLocation.village || agristackLocation.taluka) ? JSON.stringify(agristackLocation) : null]
               );
         }
         // Check if we have a processor for this event type

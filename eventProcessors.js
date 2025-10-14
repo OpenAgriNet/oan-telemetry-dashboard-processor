@@ -62,7 +62,7 @@ async function loadFromDatabase(pool) {
  * @param {Object} fieldMappings - Mapping of table columns to event data paths
  * @returns {Object} - Result of the registration
  */
-async function registerEventProcessor(eventType, tableName, fieldMappings, pool) {
+async function registerEventProcessor(eventType, tableName, fieldMappings, fieldVerification, pool) {
   const client = await pool.connect();
   try {
     // Check if the target table exists and create it if not
@@ -70,15 +70,15 @@ async function registerEventProcessor(eventType, tableName, fieldMappings, pool)
     
     // Insert or update event processor configuration
     await client.query(
-      `INSERT INTO event_processors (event_type, table_name, field_mappings)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (event_type) 
-       DO UPDATE SET table_name = $2, field_mappings = $3, updated_at = NOW()`,
-      [eventType, tableName, JSON.stringify(fieldMappings)]
+      `INSERT INTO event_processors (event_type, table_name, field_mappings, field_verification)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (table_name)
+       DO UPDATE SET event_type = $1, field_mappings = $3, field_verification = $4, updated_at = NOW()`,
+      [eventType, tableName, JSON.stringify(fieldMappings), fieldVerification]
     );
     
     // Register the processor in memory
-    registerProcessor(eventType, tableName, fieldMappings);
+    registerProcessor(null, eventType, tableName, fieldMappings, fieldVerification);
     
     logger.info(`Registered event processor for event type: ${eventType}`);
     return { success: true };
@@ -163,11 +163,24 @@ function registerProcessor(id,eventType, tableName, fieldMappings, fieldVerifica
       const placeholders = [];
       let paramIndex = 1;
 
-      //
-      
+      function resolveValueForField(fieldName, mappingPath) {
+        const direct = getNestedValue(event, mappingPath);
+        if (direct !== undefined && direct !== null) return direct;
+
+        // Try common nested context: edata.eks.target.*
+        const targetPath = `edata.eks.target.${mappingPath}`;
+        const fromTarget = getNestedValue(event, targetPath);
+        if (fromTarget !== undefined && fromTarget !== null) return fromTarget;
+
+        // Fallbacks for plain fields
+        if (event[mappingPath] !== undefined && event[mappingPath] !== null) return event[mappingPath];
+        if (event[fieldName] !== undefined && event[fieldName] !== null) return event[fieldName];
+        return null;
+      }
+
       Object.entries(fieldMappings).forEach(([field, path]) => {
         fields.push(field.toLowerCase());
-        let value = getNestedValue(event, path);
+        let value = resolveValueForField(field.toLowerCase(), path);
         
         // Handle telemetry context fields that are not in individual events
         // but are part of the telemetry configuration
@@ -175,32 +188,34 @@ function registerProcessor(id,eventType, tableName, fieldMappings, fieldVerifica
         const locationFields = ['registered_location', 'device_location', 'agristack_location'];
         
         if (telemetryContextFields.includes(path) || telemetryContextFields.includes(field.toLowerCase())) {
-          // These values would be available in the telemetry context
-          // For now, we'll extract from event if available, otherwise set to null
-          // In production, these would come from the telemetry context/configuration
-          value = getNestedValue(event, path) || event[path] || event[field] || null;
+          // Try nested target context first
+          value = resolveValueForField(field.toLowerCase(), path);
         } 
         // Handle location JSON formation
         else if (locationFields.includes(field.toLowerCase())) {
           // Construct JSON object for location data from individual district/village/taluka fields
           // The telemetry sends: registered_location_district, registered_location_village, registered_location_taluka
           const locationPrefix = field.toLowerCase(); // e.g., "registered_location"
+          const districtPath = `${locationPrefix}_district`;
+          const villagePath = `${locationPrefix}_village`;
+          const talukaPath = `${locationPrefix}_taluka`;
+          const lgdCodePath = `${locationPrefix}_lgd_code`;
           value = {
-            district: event[`${locationPrefix}_district`] || 
-                     getNestedValue(event, `${locationPrefix}_district`) || null,
-            village: event[`${locationPrefix}_village`] || 
-                    getNestedValue(event, `${locationPrefix}_village`) || null,
-            taluka: event[`${locationPrefix}_taluka`] || 
-                   getNestedValue(event, `${locationPrefix}_taluka`) || null
+            district: resolveValueForField(districtPath, districtPath),
+            village: resolveValueForField(villagePath, villagePath),
+            taluka: resolveValueForField(talukaPath, talukaPath),
+            lgd_code: resolveValueForField(lgdCodePath, lgdCodePath)
           };
           
           // If all location fields are null, set the entire value to null
-          if (!value.district && !value.village && !value.taluka) {
+          if (!value.district && !value.village && !value.taluka && !value.lgd_code) {
             value = null;
           }
         }
         
-        values.push((typeof value === 'object' && value !== null) ? JSON.stringify(value) : value);
+        // Ensure JSONB fields are sent as proper JSON values in SQL (pg driver handles JS objects)
+        const isJsonField = ['registered_location', 'device_location', 'agristack_location', 'groupdetails', 'answertext'].includes(field.toLowerCase());
+        values.push(isJsonField ? (value === null ? null : value) : ((typeof value === 'object' && value !== null) ? JSON.stringify(value) : value));
         placeholders.push(`$${paramIndex++}`);
       });
 

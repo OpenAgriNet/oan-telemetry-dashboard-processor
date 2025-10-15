@@ -1,0 +1,88 @@
+{
+  "id": "ekstep.telemetry",
+  "ver": "2.2",
+  "ets": 1760435027620,
+  "events": [
+    {
+      "eid": "OE_START",
+      "ver": "2.2",
+      "mid": "OE_34b3336ade99718a1496a5e11b4d3bb8",
+      "ets": 1760434986580,
+      "channel": "MahaVistaar-https://prodaskvistaar.mahapocra.gov.in",
+      "pdata": { "id": "MahaVistaar", "ver": "v0.1" },
+      "gdata": { "id": "content_id", "ver": "contetn_ver" },
+      "cdata": [],
+      "uid": "vinayakaji gadhawe",
+      "sid": "11e39a11-d58d-459e-869b-5a7da5f262a1",
+      "did": "default-email",
+      "edata": { "eks": {} },
+      "etags": { "partner": [] }
+    },
+    {
+      "eid": "OE_ITEM_RESPONSE",
+      "ver": "2.2",
+      "mid": "OE_50d3b1181e1f288d38690b08ba6698c0",
+      "ets": 1760435027618,
+      "channel": "MahaVistaar-https://prodaskvistaar.mahapocra.gov.in",
+      "pdata": { "id": "MahaVistaar", "ver": "v0.1" },
+      "gdata": { "id": "content_id", "ver": "contetn_ver" },
+      "cdata": [],
+      "uid": "vinayakaji gadhawe",
+      "sid": "11e39a11-d58d-459e-869b-5a7da5f262a1",
+      "did": "default-email",
+      "edata": {
+        "eks": {
+          "target": {
+            "id": "default",
+            "ver": "v0.1",
+            "type": "Question",
+            "parent": { "id": "p1", "type": "default" },
+            "questionsDetails": {
+              "questionText": "हरभऱ्यातील घाटे अळीचे नियत्रंण ",
+              "sessionId": "11e39a11-d58d-459e-869b-5a7da5f262a1"
+            },
+            "mobile": "9552742077",
+            "username": "vinayakaji gadhawe",
+            "email": "",
+            "role": "public",
+            "farmer_id": "",
+            "unique_id": "133573",
+            "registered_location_district": "नागपूर",
+            "registered_location_village": "सावरगाव",
+            "registered_location_taluka": "कुही",
+            "registered_location_lgd_code": "536388",
+            "device_location_district": "नागपूर",
+            "device_location_village": "सावरगाव",
+            "device_location_taluka": "कुही",
+            "device_location_lgd_code": "",
+            "agristack_location_district": "",
+            "agristack_location_village": "",
+            "agristack_location_taluka": "",
+            "agristack_location_lgd_code": ""
+          },
+          "qid": "955c9253-5f9e-4620-8242-f10a0e7c7bc3",
+          "type": "CHOOSE",
+          "state": ""
+        }
+      },
+      "etags": { "partner": [] }
+    },
+    {
+      "eid": "OE_END",
+      "ver": "2.2",
+      "mid": "OE_7afb9ab4e9f2aaf2f5f037c6ab16b307",
+      "ets": 1760435027619,
+      "channel": "MahaVistaar-https://prodaskvistaar.mahapocra.gov.in",
+      "pdata": { "id": "MahaVistaar", "ver": "v0.1" },
+      "gdata": { "id": "content_id", "ver": "contetn_ver" },
+      "cdata": [],
+      "uid": "vinayakaji gadhawe",
+      "sid": "11e39a11-d58d-459e-869b-5a7da5f262a1",
+      "did": "default-email",
+      "edata": { "eks": { "progress": 50, "stageid": "", "length": 41.039 } },
+      "etags": { "partner": [] }
+    }
+  ],
+  "mid": "48af2b00-a8e2-11f0-9cab-f7b70f3410a3",
+  "syncts": 1760435028400
+}

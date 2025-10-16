@@ -1,20 +1,24 @@
 /**
  * Telemetry Log Processor Microservice
- * 
+ *
  * This service processes telemetry logs from PostgreSQL database
  * - Extracts configurable event types and stores in respective tables
  * - Updates sync_status after processing
  * - Runs every 5 minutes processing configurable batch size
  */
-const fs = require('fs');
-const path = require('path');
-const express = require('express');
-const { Pool } = require('pg');
-const cron = require('node-cron');
-const dotenv = require('dotenv');
-const logger = require('./logger');
-const { eventProcessors, loadEventProcessors, getNestedValue } = require('./eventProcessors');
-const { forEach } = require('lodash');
+const fs = require("fs");
+const path = require("path");
+const express = require("express");
+const { Pool } = require("pg");
+const cron = require("node-cron");
+const dotenv = require("dotenv");
+const logger = require("./logger");
+const {
+  eventProcessors,
+  loadEventProcessors,
+  getNestedValue,
+} = require("./eventProcessors");
+const { forEach } = require("lodash");
 
 // Load environment variables from .env file
 dotenv.config();
@@ -25,7 +29,9 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const BATCH_SIZE = process.env.BATCH_SIZE || 10;
-const CRON_SCHEDULE = process.env.CRON_SCHEDULE || '*/5 * * * *';
+const CRON_SCHEDULE = process.env.CRON_SCHEDULE || "*/5 * * * *";
+const LEADERBOARD_REFRESH_SCHEDULE =
+  process.env.LEADERBOARD_REFRESH_SCHEDULE || "0 1 * * *"; // Run at 1 AM every day
 
 // PostgreSQL connection pool
 // const pool = new Pool({
@@ -44,12 +50,10 @@ const pool = new Pool({
   // }
 });
 
-
 // Ensure necessary tables exist
 async function ensureTablesExist() {
   const client = await pool.connect();
   try {
-
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.dead_letter_logs (
         level character varying COLLATE pg_catalog."default",
@@ -83,6 +87,37 @@ async function ensureTablesExist() {
         device_location JSONB,
         agristack_location JSONB,
         created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    // Create leaderboard table if not exists
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.leaderboard (
+        unique_id VARCHAR NOT NULL,
+        mobile VARCHAR,
+        username VARCHAR,
+        email VARCHAR,
+        role VARCHAR,
+        farmer_id VARCHAR,
+        registered_location JSONB,
+        record_count INTEGER,
+        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (unique_id)
+      )
+    `);
+
+    // Create user-location-aggr table if not exists
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.user_location_aggr (
+        unique_id VARCHAR NOT NULL,
+        mobile VARCHAR,
+        username VARCHAR,
+        email VARCHAR,
+        role VARCHAR,
+        farmer_id VARCHAR,
+        registered_location JSONB,
+        record_count INTEGER,
+        PRIMARY KEY (unique_id)
       )
     `);
 
@@ -267,7 +302,7 @@ async function ensureTablesExist() {
       ON CONFLICT (table_name) DO NOTHING;
     `);
 
-     await client.query(`
+    await client.query(`
       INSERT INTO public.event_processors (event_type, table_name, field_mappings, field_verification)
       VALUES 
         ('OE_ITEM_RESPONSE', 'errorDetails', '{
@@ -315,7 +350,6 @@ async function ensureTablesExist() {
       ON CONFLICT (table_name) DO NOTHING;
     `);
 
-
     /*
         await client.query(`
           INSERT INTO public.event_processors (event_type, table_name, field_mappings)
@@ -335,9 +369,9 @@ async function ensureTablesExist() {
           ON CONFLICT (event_type) DO NOTHING;
         `);
     */
-    logger.info('Database tables verified and created if needed');
+    logger.info("Database tables verified and created if needed");
   } catch (err) {
-    logger.error('Error ensuring tables exist:', err);
+    logger.error("Error ensuring tables exist:", err);
     throw err;
   } finally {
     client.release();
@@ -352,7 +386,7 @@ function parseTelemetryMessage(message) {
     // Return the events array from the parsed message
     return parsedMessage.events || [];
   } catch (err) {
-    logger.error('Error parsing telemetry message:', err);
+    logger.error("Error parsing telemetry message:", err);
     return [];
   }
 }
@@ -362,7 +396,7 @@ async function processTelemetryLogs() {
   const client = await pool.connect();
   try {
     // Begin transaction
-    await client.query('BEGIN');
+    await client.query("BEGIN");
 
     // Get unprocessed logs
     const result = await client.query(
@@ -373,9 +407,9 @@ async function processTelemetryLogs() {
       [BATCH_SIZE]
     );
     if (result.rows.length === 0) {
-      logger.info('No new telemetry logs to process');
-      await client.query('COMMIT');
-      return { processed: 0, status: 'success' };
+      logger.info("No new telemetry logs to process");
+      await client.query("COMMIT");
+      return { processed: 0, status: "success" };
     }
 
     logger.info(`Processing ${result.rows.length} telemetry logs`);
@@ -389,24 +423,34 @@ async function processTelemetryLogs() {
         const eventType = event.eid;
         let eventProssed = false;
         forEach(eventProcessors, async (processor, key) => {
-          const verified = getNestedValue(event, processor["fieldVerification"]);
-          if (processor['eventType'] === eventType && verified !== undefined && !eventProssed) {
+          const verified = getNestedValue(
+            event,
+            processor["fieldVerification"]
+          );
+          if (
+            processor["eventType"] === eventType &&
+            verified !== undefined &&
+            !eventProssed
+          ) {
             eventProssed = true;
             await processor["process"](client, event);
             // Come out of the loop if we find a matching processo
             //logger.info(`Processed event type: ${eventType}`);
           }
         });
-        if (eventType !== 'OE_END' && eventType !== 'OE_START' && eventProssed === false) {
-              logger.debug(`No processor defined for event type: ${eventType}`);
-              
-              await client.query(
-                `Insert into dead_letter_logs(level, message, meta, event_name) values ($1, $2, $3, $4)`,
-                [log.level, JSON.stringify(event), log.meta, eventType]
-              );
+        if (
+          eventType !== "OE_END" &&
+          eventType !== "OE_START" &&
+          eventProssed === false
+        ) {
+          logger.debug(`No processor defined for event type: ${eventType}`);
+
+          await client.query(
+            `Insert into dead_letter_logs(level, message, meta, event_name) values ($1, $2, $3, $4)`,
+            [log.level, JSON.stringify(event), log.meta, eventType]
+          );
         }
         // Check if we have a processor for this event type
-
       }
       // Update sync status for processed log
       //console.log(`Updating sync status for log with timestamp: ${log.timestamp}`);
@@ -418,13 +462,13 @@ async function processTelemetryLogs() {
     }
 
     // Commit transaction
-    await client.query('COMMIT');
+    await client.query("COMMIT");
     logger.info(`Successfully processed ${result.rows.length} telemetry logs`);
-    return { processed: result.rows.length, status: 'success' };
+    return { processed: result.rows.length, status: "success" };
   } catch (err) {
-    await client.query('ROLLBACK');
-    logger.error('Error processing telemetry logs:', err);
-    return { processed: 0, status: 'error', error: err.message };
+    await client.query("ROLLBACK");
+    logger.error("Error processing telemetry logs:", err);
+    return { processed: 0, status: "error", error: err.message };
   } finally {
     client.release();
   }
@@ -436,11 +480,14 @@ async function processQuestionData(client, event) {
     // Extract required fields
     const uid = event.uid;
     const sid = event.sid;
-    const groupDetails = event.edata?.eks?.target?.questionsDetails?.groupDetails || [];
+    const groupDetails =
+      event.edata?.eks?.target?.questionsDetails?.groupDetails || [];
     const channel = event.channel;
     const ets = event.ets;
-    const questionText = event.edata?.eks?.target?.questionsDetails?.questionText;
-    const questionSource = event.edata?.eks?.target?.questionsDetails?.questionSource;
+    const questionText =
+      event.edata?.eks?.target?.questionsDetails?.questionText;
+    const questionSource =
+      event.edata?.eks?.target?.questionsDetails?.questionSource;
     const answerText = event.edata?.eks?.target?.questionsDetails?.answerText;
     const answer = answerText?.answer;
 
@@ -451,14 +498,26 @@ async function processQuestionData(client, event) {
         question_text, question_source, answer_text, answer
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
       [
-        uid, sid, JSON.stringify(groupDetails), channel, ets,
-        questionText, questionSource, JSON.stringify(answerText), answer
+        uid,
+        sid,
+        JSON.stringify(groupDetails),
+        channel,
+        ets,
+        questionText,
+        questionSource,
+        JSON.stringify(answerText),
+        answer,
       ]
     );
 
-    logger.info(`Processed question data for uid: ${uid}, question: ${questionText?.substring(0, 30)}...`);
+    logger.info(
+      `Processed question data for uid: ${uid}, question: ${questionText?.substring(
+        0,
+        30
+      )}...`
+    );
   } catch (err) {
-    logger.error('Error processing question data:', err);
+    logger.error("Error processing question data:", err);
     throw err;
   }
 }
@@ -486,15 +545,24 @@ async function processFeedbackData(client, event) {
         answer_text, feedback_type
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
-        uid, sid, JSON.stringify(groupDetails), channel, ets,
-        feedbackText, sessionId, questionText,
-        answerText, feedbackType
+        uid,
+        sid,
+        JSON.stringify(groupDetails),
+        channel,
+        ets,
+        feedbackText,
+        sessionId,
+        questionText,
+        answerText,
+        feedbackType,
       ]
     );
 
-    logger.info(`Processed feedback data for uid: ${uid}, feedback type: ${feedbackType}`);
+    logger.info(
+      `Processed feedback data for uid: ${uid}, feedback type: ${feedbackType}`
+    );
   } catch (err) {
-    logger.error('Error processing feedback data:', err);
+    logger.error("Error processing feedback data:", err);
     throw err;
   }
 }
@@ -506,62 +574,195 @@ cron.schedule(CRON_SCHEDULE, async () => {
 });
 
 // API endpoint to manually trigger processing
-app.post('/api/process-logs', async (req, res) => {
+app.post("/api/process-logs", async (req, res) => {
   try {
     const result = await processTelemetryLogs();
     res.status(200).json({
-      message: 'Telemetry log processing triggered successfully',
-      ...result
+      message: "Telemetry log processing triggered successfully",
+      ...result,
     });
   } catch (err) {
-    logger.error('Error triggering telemetry log processing:', err);
-    res.status(500).json({ error: 'Failed to process telemetry logs', details: err.message });
+    logger.error("Error triggering telemetry log processing:", err);
+    res.status(500).json({
+      error: "Failed to process telemetry logs",
+      details: err.message,
+    });
   }
 });
 
 // API endpoint to get configured event processors
-app.get('/api/event-processors', (req, res) => {
-  const processors = Object.keys(eventProcessors).map(eventType => ({
+app.get("/api/event-processors", (req, res) => {
+  const processors = Object.keys(eventProcessors).map((eventType) => ({
     eventType,
-    isActive: true
+    isActive: true,
   }));
 
   res.status(200).json({ processors });
 });
 
 // API endpoint to register a new event processor configuration
-app.post('/api/event-processors', async (req, res) => {
+app.post("/api/event-processors", async (req, res) => {
   try {
     const { eventType, tableName, fieldMappings } = req.body;
 
     if (!eventType || !tableName || !fieldMappings) {
       return res.status(400).json({
-        error: 'Missing required parameters: eventType, tableName, and fieldMappings are required'
+        error:
+          "Missing required parameters: eventType, tableName, and fieldMappings are required",
       });
     }
 
     // Register the new event processor configuration
-    const result = await loadEventProcessors.registerEventProcessor(eventType, tableName, fieldMappings);
-
-    res.status(201).json({
-      message: 'Event processor registered successfully',
+    const result = await loadEventProcessors.registerEventProcessor(
       eventType,
       tableName,
-      ...result
+      fieldMappings
+    );
+
+    res.status(201).json({
+      message: "Event processor registered successfully",
+      eventType,
+      tableName,
+      ...result,
     });
   } catch (err) {
-    logger.error('Error registering event processor:', err);
-    res.status(500).json({ error: 'Failed to register event processor', details: err.message });
+    logger.error("Error registering event processor:", err);
+    res.status(500).json({
+      error: "Failed to register event processor",
+      details: err.message,
+    });
   }
 });
 
 // Health check endpoint
-app.get('/health', (req, res) => {
+app.get("/health", (req, res) => {
   res.status(200).json({
-    status: 'UP',
-    version: process.env.npm_package_version || '1.0.0',
-    eventProcessors: Object.keys(eventProcessors).length
+    status: "UP",
+    version: process.env.npm_package_version || "1.0.0",
+    eventProcessors: Object.keys(eventProcessors).length,
   });
+});
+
+// Function to refresh user location aggregation data
+async function refreshUserLocationAggregation() {
+  const client = await pool.connect();
+  try {
+    logger.info("Starting user location aggregation refresh");
+
+    // Begin transaction
+    await client.query("BEGIN");
+
+    // Clear existing aggregation data
+    await client.query("TRUNCATE TABLE public.user_location_aggr");
+
+    // Insert fresh aggregation data
+    await client.query(`
+      INSERT INTO public.user_location_aggr (
+        unique_id,
+        mobile,
+        username,
+        email,
+        role,
+        farmer_id,
+        registered_location,
+        record_count
+      )
+      SELECT 
+        unique_id,
+        mobile,
+        username,
+        email,
+        role,
+        farmer_id,
+        registered_location,
+        COUNT(*) as record_count
+      FROM 
+        public.questions
+      WHERE 
+        created_at >= '2025-10-01 00:00:00'
+      GROUP BY 
+        unique_id,
+        mobile,
+        username,
+        email,
+        role,
+        farmer_id,
+        registered_location
+    `);
+
+    // Update the leaderboard with fresh data
+    await client.query(`
+      INSERT INTO public.leaderboard (
+        unique_id,
+        mobile,
+        username,
+        email,
+        role,
+        farmer_id,
+        registered_location,
+        record_count,
+        last_updated
+      )
+      SELECT 
+        unique_id,
+        mobile,
+        username,
+        email,
+        role,
+        farmer_id,
+        registered_location,
+        record_count,
+        CURRENT_TIMESTAMP
+      FROM 
+        public.user_location_aggr
+      ON CONFLICT (unique_id) 
+      DO UPDATE SET
+        mobile = EXCLUDED.mobile,
+        username = EXCLUDED.username,
+        email = EXCLUDED.email,
+        role = EXCLUDED.role,
+        farmer_id = EXCLUDED.farmer_id,
+        registered_location = EXCLUDED.registered_location,
+        record_count = EXCLUDED.record_count,
+        last_updated = CURRENT_TIMESTAMP
+    `);
+
+    await client.query("COMMIT");
+    logger.info("User location aggregation refresh completed successfully");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    logger.error("Error refreshing user location aggregation:", err);
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// Schedule leaderboard refresh job to run at 1 AM daily
+cron.schedule(LEADERBOARD_REFRESH_SCHEDULE, async () => {
+  logger.info(
+    `Running scheduled leaderboard refresh (${LEADERBOARD_REFRESH_SCHEDULE})`
+  );
+  try {
+    await refreshUserLocationAggregation();
+  } catch (err) {
+    logger.error("Scheduled leaderboard refresh failed:", err);
+  }
+});
+
+// API endpoint to manually trigger leaderboard refresh
+app.post("/api/refresh-leaderboard", async (req, res) => {
+  try {
+    await refreshUserLocationAggregation();
+    res.status(200).json({
+      message: "Leaderboard refresh completed successfully",
+    });
+  } catch (err) {
+    logger.error("Error triggering leaderboard refresh:", err);
+    res
+      .status(500)
+      .json({ error: "Failed to refresh leaderboard", details: err.message });
+  }
 });
 
 // Start server
@@ -583,14 +784,14 @@ async function startServer() {
 
     return server;
   } catch (err) {
-    logger.error('Failed to start server:', err);
+    logger.error("Failed to start server:", err);
     process.exit(1);
   }
 }
 
 // Handle shutdown gracefully
-process.on('SIGTERM', () => {
-  logger.info('SIGTERM received, shutting down gracefully');
+process.on("SIGTERM", () => {
+  logger.info("SIGTERM received, shutting down gracefully");
   pool.end();
   process.exit(0);
 });
@@ -601,7 +802,7 @@ module.exports = {
   startServer,
   processTelemetryLogs,
   ensureTablesExist,
-  parseTelemetryMessage
+  parseTelemetryMessage,
 };
 
 // Only start server if this file is run directly (not when required in tests)

@@ -69,6 +69,7 @@ async function ensureTablesExist() {
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.questions (
         id UUID DEFAULT gen_random_uuid(),
+        unique_id VARCHAR,
         uid VARCHAR,
         sid VARCHAR,
         groupdetails TEXT,
@@ -125,6 +126,9 @@ async function ensureTablesExist() {
     await client.query(`
       DO $$ 
       BEGIN 
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='questions' AND column_name='unique_id') THEN
+          ALTER TABLE public.questions ADD COLUMN unique_id VARCHAR;
+        END IF;
         IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='questions' AND column_name='mobile') THEN
           ALTER TABLE public.questions ADD COLUMN mobile VARCHAR;
         END IF;
@@ -155,6 +159,7 @@ async function ensureTablesExist() {
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.errorDetails (
         id UUID DEFAULT gen_random_uuid(),
+        unique_id VARCHAR,
         uid VARCHAR,
         sid VARCHAR,
         groupdetails TEXT,
@@ -178,6 +183,9 @@ async function ensureTablesExist() {
     await client.query(`
       DO $$ 
       BEGIN 
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='errordetails' AND column_name='unique_id') THEN
+          ALTER TABLE public.errorDetails ADD COLUMN unique_id VARCHAR;
+        END IF;
         IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='errordetails' AND column_name='mobile') THEN
           ALTER TABLE public.errorDetails ADD COLUMN mobile VARCHAR;
         END IF;
@@ -209,6 +217,7 @@ async function ensureTablesExist() {
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.feedback (
         id UUID DEFAULT gen_random_uuid(),
+        unique_id VARCHAR,
         uid VARCHAR,
         sid VARCHAR,
         groupdetails JSONB,
@@ -235,6 +244,9 @@ async function ensureTablesExist() {
     await client.query(`
       DO $$ 
       BEGIN 
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='feedback' AND column_name='unique_id') THEN
+          ALTER TABLE public.feedback ADD COLUMN unique_id VARCHAR;
+        END IF;
         IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='feedback' AND column_name='mobile') THEN
           ALTER TABLE public.feedback ADD COLUMN mobile VARCHAR;
         END IF;
@@ -276,11 +288,28 @@ async function ensureTablesExist() {
       )
     `);
 
+    // Ensure required columns/indexes exist for existing deployments
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns 
+          WHERE table_schema = 'public' AND table_name = 'event_processors' AND column_name = 'field_verification'
+        ) THEN
+          ALTER TABLE public.event_processors ADD COLUMN field_verification VARCHAR;
+        END IF;
+      END $$;
+    `);
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS event_processors_table_name_key ON public.event_processors (table_name);
+    `);
+
     // Insert default event processors if they don't exist
     await client.query(`
       INSERT INTO public.event_processors (event_type, table_name, field_mappings, field_verification)
       VALUES 
         ('OE_ITEM_RESPONSE', 'questions', '{
+          "unique_id": "edata.eks.target.unique_id",
           "uid": "uid",
           "sid": "sid",
           "groupDetails": "edata.eks.target.questionsDetails.groupDetails",
@@ -290,44 +319,99 @@ async function ensureTablesExist() {
           "questionSource": "edata.eks.target.questionsDetails.questionSource",
           "answerText": "edata.eks.target.questionsDetails.answerText",
           "answer": "edata.eks.target.questionsDetails.answerText.answer",
-          "mobile": "mobile",
-          "username": "username",
-          "email": "email",
-          "role": "role",
-          "farmer_id": "farmer_id",
+          "mobile": "edata.eks.target.mobile",
+          "username": "edata.eks.target.username",
+          "email": "edata.eks.target.email",
+          "role": "edata.eks.target.role",
+          "farmer_id": "edata.eks.target.farmer_id",
           "registered_location": "registered_location",
           "device_location": "device_location",
           "agristack_location": "agristack_location"
         }','edata.eks.target.questionsDetails')
-      ON CONFLICT (table_name) DO NOTHING;
+      ON CONFLICT DO NOTHING;
+    `);
+    await client.query(`
+      UPDATE public.event_processors
+      SET 
+        event_type = 'OE_ITEM_RESPONSE',
+        field_mappings = '{
+          "unique_id": "edata.eks.target.unique_id",
+          "uid": "uid",
+          "sid": "sid",
+          "groupDetails": "edata.eks.target.questionsDetails.groupDetails",
+          "channel": "channel",
+          "ets": "ets",
+          "questionText": "edata.eks.target.questionsDetails.questionText",
+          "questionSource": "edata.eks.target.questionsDetails.questionSource",
+          "answerText": "edata.eks.target.questionsDetails.answerText",
+          "answer": "edata.eks.target.questionsDetails.answerText.answer",
+          "mobile": "edata.eks.target.mobile",
+          "username": "edata.eks.target.username",
+          "email": "edata.eks.target.email",
+          "role": "edata.eks.target.role",
+          "farmer_id": "edata.eks.target.farmer_id",
+          "registered_location": "registered_location",
+          "device_location": "device_location",
+          "agristack_location": "agristack_location"
+        }',
+        field_verification = 'edata.eks.target.questionsDetails',
+        updated_at = NOW()
+      WHERE table_name = 'questions';
     `);
 
     await client.query(`
       INSERT INTO public.event_processors (event_type, table_name, field_mappings, field_verification)
       VALUES 
         ('OE_ITEM_RESPONSE', 'errorDetails', '{
+          "unique_id": "edata.eks.target.unique_id",
           "uid": "uid",
           "sid": "sid",
           "channel": "channel",
           "ets": "ets",
           "errorText": "edata.eks.target.errorDetails.errorText",
           "qid": "edata.eks.qid",
-          "mobile": "mobile",
-          "username": "username",
-          "email": "email",
-          "role": "role",
-          "farmer_id": "farmer_id",
+          "mobile": "edata.eks.target.mobile",
+          "username": "edata.eks.target.username",
+          "email": "edata.eks.target.email",
+          "role": "edata.eks.target.role",
+          "farmer_id": "edata.eks.target.farmer_id",
           "registered_location": "registered_location",
           "device_location": "device_location",
           "agristack_location": "agristack_location"
         }','edata.eks.target.errorDetails')
-      ON CONFLICT (table_name) DO NOTHING;
+      ON CONFLICT DO NOTHING;
+    `);
+    await client.query(`
+      UPDATE public.event_processors
+      SET 
+        event_type = 'OE_ITEM_RESPONSE',
+        field_mappings = '{
+          "unique_id": "edata.eks.target.unique_id",
+          "uid": "uid",
+          "sid": "sid",
+          "channel": "channel",
+          "ets": "ets",
+          "errorText": "edata.eks.target.errorDetails.errorText",
+          "qid": "edata.eks.qid",
+          "mobile": "edata.eks.target.mobile",
+          "username": "edata.eks.target.username",
+          "email": "edata.eks.target.email",
+          "role": "edata.eks.target.role",
+          "farmer_id": "edata.eks.target.farmer_id",
+          "registered_location": "registered_location",
+          "device_location": "device_location",
+          "agristack_location": "agristack_location"
+        }',
+        field_verification = 'edata.eks.target.errorDetails',
+        updated_at = NOW()
+      WHERE table_name = 'errorDetails';
     `);
 
     await client.query(`
       INSERT INTO public.event_processors (event_type, table_name, field_mappings, field_verification)
       VALUES 
         ('OE_ITEM_RESPONSE', 'feedback', '{
+          "unique_id": "edata.eks.target.unique_id",
           "uid": "uid",
           "sid": "sid",
           "groupDetails": "edata.eks.target.questionsDetails.groupDetails",
@@ -338,16 +422,45 @@ async function ensureTablesExist() {
           "answerText": "edata.eks.target.feedbackDetails.answerText",
           "feedbackType": "edata.eks.target.feedbackDetails.feedbackType",
           "qid": "edata.eks.qid",
-          "mobile": "mobile",
-          "username": "username",
-          "email": "email",
-          "role": "role",
-          "farmer_id": "farmer_id",
+          "mobile": "edata.eks.target.mobile",
+          "username": "edata.eks.target.username",
+          "email": "edata.eks.target.email",
+          "role": "edata.eks.target.role",
+          "farmer_id": "edata.eks.target.farmer_id",
           "registered_location": "registered_location",
           "device_location": "device_location",
           "agristack_location": "agristack_location"
         }','edata.eks.target.feedbackDetails')
-      ON CONFLICT (table_name) DO NOTHING;
+      ON CONFLICT DO NOTHING;
+    `);
+    await client.query(`
+      UPDATE public.event_processors
+      SET 
+        event_type = 'OE_ITEM_RESPONSE',
+        field_mappings = '{
+          "unique_id": "edata.eks.target.unique_id",
+          "uid": "uid",
+          "sid": "sid",
+          "groupDetails": "edata.eks.target.questionsDetails.groupDetails",
+          "channel": "channel",
+          "ets": "ets",
+          "feedbackText": "edata.eks.target.feedbackDetails.feedbackText",
+          "questionText": "edata.eks.target.feedbackDetails.questionText",
+          "answerText": "edata.eks.target.feedbackDetails.answerText",
+          "feedbackType": "edata.eks.target.feedbackDetails.feedbackType",
+          "qid": "edata.eks.qid",
+          "mobile": "edata.eks.target.mobile",
+          "username": "edata.eks.target.username",
+          "email": "edata.eks.target.email",
+          "role": "edata.eks.target.role",
+          "farmer_id": "edata.eks.target.farmer_id",
+          "registered_location": "registered_location",
+          "device_location": "device_location",
+          "agristack_location": "agristack_location"
+        }',
+        field_verification = 'edata.eks.target.feedbackDetails',
+        updated_at = NOW()
+      WHERE table_name = 'feedback';
     `);
 
     /*
@@ -434,8 +547,8 @@ async function processTelemetryLogs() {
           ) {
             eventProssed = true;
             await processor["process"](client, event);
-            // Come out of the loop if we find a matching processo
-            //logger.info(`Processed event type: ${eventType}`);
+            eventProssed = true;
+            break;
           }
         });
         if (
@@ -603,9 +716,9 @@ app.get("/api/event-processors", (req, res) => {
 // API endpoint to register a new event processor configuration
 app.post("/api/event-processors", async (req, res) => {
   try {
-    const { eventType, tableName, fieldMappings } = req.body;
+    const { eventType, tableName, fieldMappings, fieldVerification } = req.body;
 
-    if (!eventType || !tableName || !fieldMappings) {
+    if (!eventType || !tableName || !fieldMappings || !fieldVerification) {
       return res.status(400).json({
         error:
           "Missing required parameters: eventType, tableName, and fieldMappings are required",

@@ -324,9 +324,9 @@ async function ensureTablesExist() {
           "email": "edata.eks.target.email",
           "role": "edata.eks.target.role",
           "farmer_id": "edata.eks.target.farmer_id",
-          "registered_location": "registered_location",
-          "device_location": "device_location",
-          "agristack_location": "agristack_location"
+          "registered_location": "edata.eks.target.registered_location",
+          "device_location": "edata.eks.target.device_location",
+          "agristack_location": "edata.eks.target.agristack_location"
         }','edata.eks.target.questionsDetails')
       ON CONFLICT DO NOTHING;
     `);
@@ -350,9 +350,9 @@ async function ensureTablesExist() {
           "email": "edata.eks.target.email",
           "role": "edata.eks.target.role",
           "farmer_id": "edata.eks.target.farmer_id",
-          "registered_location": "registered_location",
-          "device_location": "device_location",
-          "agristack_location": "agristack_location"
+          "registered_location": "edata.eks.target.registered_location",
+          "device_location": "edata.eks.target.device_location",
+          "agristack_location": "edata.eks.target.agristack_location"
         }',
         field_verification = 'edata.eks.target.questionsDetails',
         updated_at = NOW()
@@ -375,9 +375,9 @@ async function ensureTablesExist() {
           "email": "edata.eks.target.email",
           "role": "edata.eks.target.role",
           "farmer_id": "edata.eks.target.farmer_id",
-          "registered_location": "registered_location",
-          "device_location": "device_location",
-          "agristack_location": "agristack_location"
+          "registered_location": "edata.eks.target.registered_location",
+          "device_location": "edata.eks.target.device_location",
+          "agristack_location": "edata.eks.target.agristack_location"
         }','edata.eks.target.errorDetails')
       ON CONFLICT DO NOTHING;
     `);
@@ -398,9 +398,9 @@ async function ensureTablesExist() {
           "email": "edata.eks.target.email",
           "role": "edata.eks.target.role",
           "farmer_id": "edata.eks.target.farmer_id",
-          "registered_location": "registered_location",
-          "device_location": "device_location",
-          "agristack_location": "agristack_location"
+          "registered_location": "edata.eks.target.registered_location",
+          "device_location": "edata.eks.target.device_location",
+          "agristack_location": "edata.eks.target.agristack_location"
         }',
         field_verification = 'edata.eks.target.errorDetails',
         updated_at = NOW()
@@ -427,9 +427,9 @@ async function ensureTablesExist() {
           "email": "edata.eks.target.email",
           "role": "edata.eks.target.role",
           "farmer_id": "edata.eks.target.farmer_id",
-          "registered_location": "registered_location",
-          "device_location": "device_location",
-          "agristack_location": "agristack_location"
+          "registered_location": "edata.eks.target.registered_location",
+          "device_location": "edata.eks.target.device_location",
+          "agristack_location": "edata.eks.target.agristack_location"
         }','edata.eks.target.feedbackDetails')
       ON CONFLICT DO NOTHING;
     `);
@@ -454,9 +454,9 @@ async function ensureTablesExist() {
           "email": "edata.eks.target.email",
           "role": "edata.eks.target.role",
           "farmer_id": "edata.eks.target.farmer_id",
-          "registered_location": "registered_location",
-          "device_location": "device_location",
-          "agristack_location": "agristack_location"
+          "registered_location": "edata.eks.target.registered_location",
+          "device_location": "edata.eks.target.device_location",
+          "agristack_location": "edata.eks.target.agristack_location"
         }',
         field_verification = 'edata.eks.target.feedbackDetails',
         updated_at = NOW()
@@ -789,20 +789,35 @@ async function refreshUserLocationAggregation() {
         role,
         farmer_id,
         registered_location,
-        COUNT(*) as record_count
-      FROM 
-        public.questions
-      WHERE 
-        created_at >= '2025-10-01 00:00:00'
-        AND unique_id IS NOT NULL
-      GROUP BY 
-        unique_id,
-        mobile,
-        username,
-        email,
-        role,
-        farmer_id,
-        registered_location
+        total_count as record_count
+      FROM (
+        SELECT 
+          unique_id,
+          mobile,
+          username,
+          email,
+          role,
+          farmer_id,
+          registered_location,
+          SUM(COUNT(*)) OVER (PARTITION BY unique_id) as total_count,
+          ROW_NUMBER() OVER (PARTITION BY unique_id ORDER BY MAX(created_at) DESC) as rn
+        FROM 
+          public.questions
+        WHERE 
+          created_at >= '2025-10-01 00:00:00'
+          AND unique_id IS NOT NULL
+          AND registered_location IS NOT NULL
+          AND answertext IS NOT NULL
+        GROUP BY 
+          unique_id,
+          mobile,
+          username,
+          email,
+          role,
+          farmer_id,
+          registered_location
+      ) q
+      WHERE q.rn = 1
     `);
 
     // Update the leaderboard with fresh data
@@ -896,6 +911,9 @@ async function startServer() {
 
     // Run initial processing
     await processTelemetryLogs();
+
+    // Refresh user location aggregation on startup
+    await refreshUserLocationAggregation();
 
     return server;
   } catch (err) {

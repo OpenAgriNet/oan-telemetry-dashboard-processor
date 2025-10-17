@@ -535,7 +535,8 @@ async function processTelemetryLogs() {
       for (const event of events) {
         const eventType = event.eid;
         let eventProssed = false;
-        forEach(eventProcessors, async (processor, key) => {
+        for (const key in eventProcessors) {
+          const processor = eventProcessors[key];
           const verified = getNestedValue(
             event,
             processor["fieldVerification"]
@@ -550,7 +551,7 @@ async function processTelemetryLogs() {
             eventProssed = true;
             break;
           }
-        });
+        }
         if (
           eventType !== "OE_END" &&
           eventType !== "OE_START" &&
@@ -793,6 +794,7 @@ async function refreshUserLocationAggregation() {
         public.questions
       WHERE 
         created_at >= '2025-10-01 00:00:00'
+        AND unique_id IS NOT NULL
       GROUP BY 
         unique_id,
         mobile,

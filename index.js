@@ -1,20 +1,24 @@
 /**
  * Telemetry Log Processor Microservice
- * 
+ *
  * This service processes telemetry logs from PostgreSQL database
  * - Extracts configurable event types and stores in respective tables
  * - Updates sync_status after processing
  * - Runs every 5 minutes processing configurable batch size
  */
-const fs = require('fs');
-const path = require('path');
-const express = require('express');
-const { Pool } = require('pg');
-const cron = require('node-cron');
-const dotenv = require('dotenv');
-const logger = require('./logger');
-const { eventProcessors, loadEventProcessors, getNestedValue } = require('./eventProcessors');
-const { forEach } = require('lodash');
+const fs = require("fs");
+const path = require("path");
+const express = require("express");
+const { Pool } = require("pg");
+const cron = require("node-cron");
+const dotenv = require("dotenv");
+const logger = require("./logger");
+const {
+  eventProcessors,
+  loadEventProcessors,
+  getNestedValue,
+} = require("./eventProcessors");
+const { forEach } = require("lodash");
 
 // Load environment variables from .env file
 dotenv.config();
@@ -25,7 +29,9 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const BATCH_SIZE = process.env.BATCH_SIZE || 10;
-const CRON_SCHEDULE = process.env.CRON_SCHEDULE || '*/5 * * * *';
+const CRON_SCHEDULE = process.env.CRON_SCHEDULE || "*/5 * * * *";
+const LEADERBOARD_REFRESH_SCHEDULE =
+  process.env.LEADERBOARD_REFRESH_SCHEDULE || "0 1 * * *"; // Run at 1 AM every day
 
 // PostgreSQL connection pool
 // const pool = new Pool({
@@ -38,18 +44,16 @@ const pool = new Pool({
   database: process.env.DB_NAME,
   password: process.env.DB_PASSWORD,
   port: parseInt(process.env.DB_PORT || "5432", 10),
-  ssl: {
-    rejectUnauthorized: true,
-    ca: fs.readFileSync(path.join(__dirname, 'certs', 'rds-global.pem')).toString()
-  }
+  // ssl: {
+  //   rejectUnauthorized: true,
+  //   ca: fs.readFileSync(path.join(__dirname, 'certs', 'rds-global.pem')).toString()
+  // }
 });
-
 
 // Ensure necessary tables exist
 async function ensureTablesExist() {
   const client = await pool.connect();
   try {
-
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.dead_letter_logs (
         level character varying COLLATE pg_catalog."default",
@@ -65,6 +69,7 @@ async function ensureTablesExist() {
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.questions (
         id UUID DEFAULT gen_random_uuid(),
+        unique_id VARCHAR,
         uid VARCHAR,
         sid VARCHAR,
         groupdetails TEXT,
@@ -86,32 +91,66 @@ async function ensureTablesExist() {
       )
     `);
 
+    // Create leaderboard table if not exists
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.leaderboard (
+        unique_id VARCHAR NOT NULL,
+        mobile VARCHAR,
+        username VARCHAR,
+        email VARCHAR,
+        role VARCHAR,
+        farmer_id VARCHAR,
+        registered_location JSONB,
+        record_count INTEGER,
+        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (unique_id)
+      )
+    `);
+
+    // Create user-location-aggr table if not exists
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.user_location_aggr (
+        unique_id VARCHAR NOT NULL,
+        mobile VARCHAR,
+        username VARCHAR,
+        email VARCHAR,
+        role VARCHAR,
+        farmer_id VARCHAR,
+        registered_location JSONB,
+        record_count INTEGER,
+        PRIMARY KEY (unique_id)
+      )
+    `);
+
     // Add missing columns to questions table if they don't exist
     await client.query(`
       DO $$ 
       BEGIN 
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='questions' AND column_name='mobile') THEN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='questions' AND column_name='unique_id') THEN
+          ALTER TABLE public.questions ADD COLUMN unique_id VARCHAR;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='questions' AND column_name='mobile') THEN
           ALTER TABLE public.questions ADD COLUMN mobile VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='questions' AND column_name='username') THEN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='questions' AND column_name='username') THEN
           ALTER TABLE public.questions ADD COLUMN username VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='questions' AND column_name='email') THEN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='questions' AND column_name='email') THEN
           ALTER TABLE public.questions ADD COLUMN email VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='questions' AND column_name='role') THEN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='questions' AND column_name='role') THEN
           ALTER TABLE public.questions ADD COLUMN role VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='questions' AND column_name='farmer_id') THEN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='questions' AND column_name='farmer_id') THEN
           ALTER TABLE public.questions ADD COLUMN farmer_id VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='questions' AND column_name='registered_location') THEN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='questions' AND column_name='registered_location') THEN
           ALTER TABLE public.questions ADD COLUMN registered_location JSONB;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='questions' AND column_name='device_location') THEN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='questions' AND column_name='device_location') THEN
           ALTER TABLE public.questions ADD COLUMN device_location JSONB;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='questions' AND column_name='agristack_location') THEN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='questions' AND column_name='agristack_location') THEN
           ALTER TABLE public.questions ADD COLUMN agristack_location JSONB;
         END IF;
       END $$;
@@ -120,6 +159,7 @@ async function ensureTablesExist() {
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.errorDetails (
         id UUID DEFAULT gen_random_uuid(),
+        unique_id VARCHAR,
         uid VARCHAR,
         sid VARCHAR,
         groupdetails TEXT,
@@ -143,28 +183,31 @@ async function ensureTablesExist() {
     await client.query(`
       DO $$ 
       BEGIN 
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='errorDetails' AND column_name='mobile') THEN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='errordetails' AND column_name='unique_id') THEN
+          ALTER TABLE public.errorDetails ADD COLUMN unique_id VARCHAR;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='errordetails' AND column_name='mobile') THEN
           ALTER TABLE public.errorDetails ADD COLUMN mobile VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='errorDetails' AND column_name='username') THEN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='errordetails' AND column_name='username') THEN
           ALTER TABLE public.errorDetails ADD COLUMN username VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='errorDetails' AND column_name='email') THEN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='errordetails' AND column_name='email') THEN
           ALTER TABLE public.errorDetails ADD COLUMN email VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='errorDetails' AND column_name='role') THEN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='errordetails' AND column_name='role') THEN
           ALTER TABLE public.errorDetails ADD COLUMN role VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='errorDetails' AND column_name='farmer_id') THEN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='errordetails' AND column_name='farmer_id') THEN
           ALTER TABLE public.errorDetails ADD COLUMN farmer_id VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='errorDetails' AND column_name='registered_location') THEN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='errordetails' AND column_name='registered_location') THEN
           ALTER TABLE public.errorDetails ADD COLUMN registered_location JSONB;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='errorDetails' AND column_name='device_location') THEN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='errordetails' AND column_name='device_location') THEN
           ALTER TABLE public.errorDetails ADD COLUMN device_location JSONB;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='errorDetails' AND column_name='agristack_location') THEN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='errordetails' AND column_name='agristack_location') THEN
           ALTER TABLE public.errorDetails ADD COLUMN agristack_location JSONB;
         END IF;
       END $$;
@@ -174,6 +217,7 @@ async function ensureTablesExist() {
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.feedback (
         id UUID DEFAULT gen_random_uuid(),
+        unique_id VARCHAR,
         uid VARCHAR,
         sid VARCHAR,
         groupdetails JSONB,
@@ -200,28 +244,31 @@ async function ensureTablesExist() {
     await client.query(`
       DO $$ 
       BEGIN 
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='feedback' AND column_name='mobile') THEN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='feedback' AND column_name='unique_id') THEN
+          ALTER TABLE public.feedback ADD COLUMN unique_id VARCHAR;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='feedback' AND column_name='mobile') THEN
           ALTER TABLE public.feedback ADD COLUMN mobile VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='feedback' AND column_name='username') THEN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='feedback' AND column_name='username') THEN
           ALTER TABLE public.feedback ADD COLUMN username VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='feedback' AND column_name='email') THEN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='feedback' AND column_name='email') THEN
           ALTER TABLE public.feedback ADD COLUMN email VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='feedback' AND column_name='role') THEN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='feedback' AND column_name='role') THEN
           ALTER TABLE public.feedback ADD COLUMN role VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='feedback' AND column_name='farmer_id') THEN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='feedback' AND column_name='farmer_id') THEN
           ALTER TABLE public.feedback ADD COLUMN farmer_id VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='feedback' AND column_name='registered_location') THEN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='feedback' AND column_name='registered_location') THEN
           ALTER TABLE public.feedback ADD COLUMN registered_location JSONB;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='feedback' AND column_name='device_location') THEN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='feedback' AND column_name='device_location') THEN
           ALTER TABLE public.feedback ADD COLUMN device_location JSONB;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='feedback' AND column_name='agristack_location') THEN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='feedback' AND column_name='agristack_location') THEN
           ALTER TABLE public.feedback ADD COLUMN agristack_location JSONB;
         END IF;
       END $$;
@@ -241,11 +288,28 @@ async function ensureTablesExist() {
       )
     `);
 
+    // Ensure required columns/indexes exist for existing deployments
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns 
+          WHERE table_schema = 'public' AND table_name = 'event_processors' AND column_name = 'field_verification'
+        ) THEN
+          ALTER TABLE public.event_processors ADD COLUMN field_verification VARCHAR;
+        END IF;
+      END $$;
+    `);
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS event_processors_table_name_key ON public.event_processors (table_name);
+    `);
+
     // Insert default event processors if they don't exist
     await client.query(`
       INSERT INTO public.event_processors (event_type, table_name, field_mappings, field_verification)
       VALUES 
         ('OE_ITEM_RESPONSE', 'questions', '{
+          "unique_id": "edata.eks.target.unique_id",
           "uid": "uid",
           "sid": "sid",
           "groupDetails": "edata.eks.target.questionsDetails.groupDetails",
@@ -255,44 +319,99 @@ async function ensureTablesExist() {
           "questionSource": "edata.eks.target.questionsDetails.questionSource",
           "answerText": "edata.eks.target.questionsDetails.answerText",
           "answer": "edata.eks.target.questionsDetails.answerText.answer",
-          "mobile": "mobile",
-          "username": "username",
-          "email": "email",
-          "role": "role",
-          "farmer_id": "farmer_id",
-          "registered_location": "registered_location",
-          "device_location": "device_location",
-          "agristack_location": "agristack_location"
+          "mobile": "edata.eks.target.mobile",
+          "username": "edata.eks.target.username",
+          "email": "edata.eks.target.email",
+          "role": "edata.eks.target.role",
+          "farmer_id": "edata.eks.target.farmer_id",
+          "registered_location": "edata.eks.target.registered_location",
+          "device_location": "edata.eks.target.device_location",
+          "agristack_location": "edata.eks.target.agristack_location"
         }','edata.eks.target.questionsDetails')
-      ON CONFLICT (table_name) DO NOTHING;
+      ON CONFLICT DO NOTHING;
+    `);
+    await client.query(`
+      UPDATE public.event_processors
+      SET 
+        event_type = 'OE_ITEM_RESPONSE',
+        field_mappings = '{
+          "unique_id": "edata.eks.target.unique_id",
+          "uid": "uid",
+          "sid": "sid",
+          "groupDetails": "edata.eks.target.questionsDetails.groupDetails",
+          "channel": "channel",
+          "ets": "ets",
+          "questionText": "edata.eks.target.questionsDetails.questionText",
+          "questionSource": "edata.eks.target.questionsDetails.questionSource",
+          "answerText": "edata.eks.target.questionsDetails.answerText",
+          "answer": "edata.eks.target.questionsDetails.answerText.answer",
+          "mobile": "edata.eks.target.mobile",
+          "username": "edata.eks.target.username",
+          "email": "edata.eks.target.email",
+          "role": "edata.eks.target.role",
+          "farmer_id": "edata.eks.target.farmer_id",
+          "registered_location": "edata.eks.target.registered_location",
+          "device_location": "edata.eks.target.device_location",
+          "agristack_location": "edata.eks.target.agristack_location"
+        }',
+        field_verification = 'edata.eks.target.questionsDetails',
+        updated_at = NOW()
+      WHERE table_name = 'questions';
     `);
 
-     await client.query(`
+    await client.query(`
       INSERT INTO public.event_processors (event_type, table_name, field_mappings, field_verification)
       VALUES 
         ('OE_ITEM_RESPONSE', 'errorDetails', '{
+          "unique_id": "edata.eks.target.unique_id",
           "uid": "uid",
           "sid": "sid",
           "channel": "channel",
           "ets": "ets",
           "errorText": "edata.eks.target.errorDetails.errorText",
           "qid": "edata.eks.qid",
-          "mobile": "mobile",
-          "username": "username",
-          "email": "email",
-          "role": "role",
-          "farmer_id": "farmer_id",
-          "registered_location": "registered_location",
-          "device_location": "device_location",
-          "agristack_location": "agristack_location"
+          "mobile": "edata.eks.target.mobile",
+          "username": "edata.eks.target.username",
+          "email": "edata.eks.target.email",
+          "role": "edata.eks.target.role",
+          "farmer_id": "edata.eks.target.farmer_id",
+          "registered_location": "edata.eks.target.registered_location",
+          "device_location": "edata.eks.target.device_location",
+          "agristack_location": "edata.eks.target.agristack_location"
         }','edata.eks.target.errorDetails')
-      ON CONFLICT (table_name) DO NOTHING;
+      ON CONFLICT DO NOTHING;
+    `);
+    await client.query(`
+      UPDATE public.event_processors
+      SET 
+        event_type = 'OE_ITEM_RESPONSE',
+        field_mappings = '{
+          "unique_id": "edata.eks.target.unique_id",
+          "uid": "uid",
+          "sid": "sid",
+          "channel": "channel",
+          "ets": "ets",
+          "errorText": "edata.eks.target.errorDetails.errorText",
+          "qid": "edata.eks.qid",
+          "mobile": "edata.eks.target.mobile",
+          "username": "edata.eks.target.username",
+          "email": "edata.eks.target.email",
+          "role": "edata.eks.target.role",
+          "farmer_id": "edata.eks.target.farmer_id",
+          "registered_location": "edata.eks.target.registered_location",
+          "device_location": "edata.eks.target.device_location",
+          "agristack_location": "edata.eks.target.agristack_location"
+        }',
+        field_verification = 'edata.eks.target.errorDetails',
+        updated_at = NOW()
+      WHERE table_name = 'errorDetails';
     `);
 
     await client.query(`
       INSERT INTO public.event_processors (event_type, table_name, field_mappings, field_verification)
       VALUES 
         ('OE_ITEM_RESPONSE', 'feedback', '{
+          "unique_id": "edata.eks.target.unique_id",
           "uid": "uid",
           "sid": "sid",
           "groupDetails": "edata.eks.target.questionsDetails.groupDetails",
@@ -303,18 +422,46 @@ async function ensureTablesExist() {
           "answerText": "edata.eks.target.feedbackDetails.answerText",
           "feedbackType": "edata.eks.target.feedbackDetails.feedbackType",
           "qid": "edata.eks.qid",
-          "mobile": "mobile",
-          "username": "username",
-          "email": "email",
-          "role": "role",
-          "farmer_id": "farmer_id",
-          "registered_location": "registered_location",
-          "device_location": "device_location",
-          "agristack_location": "agristack_location"
+          "mobile": "edata.eks.target.mobile",
+          "username": "edata.eks.target.username",
+          "email": "edata.eks.target.email",
+          "role": "edata.eks.target.role",
+          "farmer_id": "edata.eks.target.farmer_id",
+          "registered_location": "edata.eks.target.registered_location",
+          "device_location": "edata.eks.target.device_location",
+          "agristack_location": "edata.eks.target.agristack_location"
         }','edata.eks.target.feedbackDetails')
-      ON CONFLICT (table_name) DO NOTHING;
+      ON CONFLICT DO NOTHING;
     `);
-
+    await client.query(`
+      UPDATE public.event_processors
+      SET 
+        event_type = 'OE_ITEM_RESPONSE',
+        field_mappings = '{
+          "unique_id": "edata.eks.target.unique_id",
+          "uid": "uid",
+          "sid": "sid",
+          "groupDetails": "edata.eks.target.questionsDetails.groupDetails",
+          "channel": "channel",
+          "ets": "ets",
+          "feedbackText": "edata.eks.target.feedbackDetails.feedbackText",
+          "questionText": "edata.eks.target.feedbackDetails.questionText",
+          "answerText": "edata.eks.target.feedbackDetails.answerText",
+          "feedbackType": "edata.eks.target.feedbackDetails.feedbackType",
+          "qid": "edata.eks.qid",
+          "mobile": "edata.eks.target.mobile",
+          "username": "edata.eks.target.username",
+          "email": "edata.eks.target.email",
+          "role": "edata.eks.target.role",
+          "farmer_id": "edata.eks.target.farmer_id",
+          "registered_location": "edata.eks.target.registered_location",
+          "device_location": "edata.eks.target.device_location",
+          "agristack_location": "edata.eks.target.agristack_location"
+        }',
+        field_verification = 'edata.eks.target.feedbackDetails',
+        updated_at = NOW()
+      WHERE table_name = 'feedback';
+    `);
 
     /*
         await client.query(`
@@ -335,9 +482,9 @@ async function ensureTablesExist() {
           ON CONFLICT (event_type) DO NOTHING;
         `);
     */
-    logger.info('Database tables verified and created if needed');
+    logger.info("Database tables verified and created if needed");
   } catch (err) {
-    logger.error('Error ensuring tables exist:', err);
+    logger.error("Error ensuring tables exist:", err);
     throw err;
   } finally {
     client.release();
@@ -352,7 +499,7 @@ function parseTelemetryMessage(message) {
     // Return the events array from the parsed message
     return parsedMessage.events || [];
   } catch (err) {
-    logger.error('Error parsing telemetry message:', err);
+    logger.error("Error parsing telemetry message:", err);
     return [];
   }
 }
@@ -362,7 +509,7 @@ async function processTelemetryLogs() {
   const client = await pool.connect();
   try {
     // Begin transaction
-    await client.query('BEGIN');
+    await client.query("BEGIN");
 
     // Get unprocessed logs
     const result = await client.query(
@@ -373,9 +520,9 @@ async function processTelemetryLogs() {
       [BATCH_SIZE]
     );
     if (result.rows.length === 0) {
-      logger.info('No new telemetry logs to process');
-      await client.query('COMMIT');
-      return { processed: 0, status: 'success' };
+      logger.info("No new telemetry logs to process");
+      await client.query("COMMIT");
+      return { processed: 0, status: "success" };
     }
 
     logger.info(`Processing ${result.rows.length} telemetry logs`);
@@ -388,25 +535,36 @@ async function processTelemetryLogs() {
       for (const event of events) {
         const eventType = event.eid;
         let eventProssed = false;
-        forEach(eventProcessors, async (processor, key) => {
-          const verified = getNestedValue(event, processor["fieldVerification"]);
-          if (processor['eventType'] === eventType && verified !== undefined && !eventProssed) {
+        for (const key in eventProcessors) {
+          const processor = eventProcessors[key];
+          const verified = getNestedValue(
+            event,
+            processor["fieldVerification"]
+          );
+          if (
+            processor["eventType"] === eventType &&
+            verified !== undefined &&
+            !eventProssed
+          ) {
             eventProssed = true;
             await processor["process"](client, event);
-            // Come out of the loop if we find a matching processo
-            //logger.info(`Processed event type: ${eventType}`);
+            eventProssed = true;
+            break;
           }
-        });
-        if (eventType !== 'OE_END' && eventType !== 'OE_START' && eventProssed === false) {
-              logger.debug(`No processor defined for event type: ${eventType}`);
-              
-              await client.query(
-                `Insert into dead_letter_logs(level, message, meta, event_name) values ($1, $2, $3, $4)`,
-                [log.level, JSON.stringify(event), log.meta, eventType]
-              );
+        }
+        if (
+          eventType !== "OE_END" &&
+          eventType !== "OE_START" &&
+          eventProssed === false
+        ) {
+          logger.debug(`No processor defined for event type: ${eventType}`);
+
+          await client.query(
+            `Insert into dead_letter_logs(level, message, meta, event_name) values ($1, $2, $3, $4)`,
+            [log.level, JSON.stringify(event), log.meta, eventType]
+          );
         }
         // Check if we have a processor for this event type
-
       }
       // Update sync status for processed log
       //console.log(`Updating sync status for log with timestamp: ${log.timestamp}`);
@@ -418,13 +576,13 @@ async function processTelemetryLogs() {
     }
 
     // Commit transaction
-    await client.query('COMMIT');
+    await client.query("COMMIT");
     logger.info(`Successfully processed ${result.rows.length} telemetry logs`);
-    return { processed: result.rows.length, status: 'success' };
+    return { processed: result.rows.length, status: "success" };
   } catch (err) {
-    await client.query('ROLLBACK');
-    logger.error('Error processing telemetry logs:', err);
-    return { processed: 0, status: 'error', error: err.message };
+    await client.query("ROLLBACK");
+    logger.error("Error processing telemetry logs:", err);
+    return { processed: 0, status: "error", error: err.message };
   } finally {
     client.release();
   }
@@ -436,11 +594,14 @@ async function processQuestionData(client, event) {
     // Extract required fields
     const uid = event.uid;
     const sid = event.sid;
-    const groupDetails = event.edata?.eks?.target?.questionsDetails?.groupDetails || [];
+    const groupDetails =
+      event.edata?.eks?.target?.questionsDetails?.groupDetails || [];
     const channel = event.channel;
     const ets = event.ets;
-    const questionText = event.edata?.eks?.target?.questionsDetails?.questionText;
-    const questionSource = event.edata?.eks?.target?.questionsDetails?.questionSource;
+    const questionText =
+      event.edata?.eks?.target?.questionsDetails?.questionText;
+    const questionSource =
+      event.edata?.eks?.target?.questionsDetails?.questionSource;
     const answerText = event.edata?.eks?.target?.questionsDetails?.answerText;
     const answer = answerText?.answer;
 
@@ -451,14 +612,26 @@ async function processQuestionData(client, event) {
         question_text, question_source, answer_text, answer
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
       [
-        uid, sid, JSON.stringify(groupDetails), channel, ets,
-        questionText, questionSource, JSON.stringify(answerText), answer
+        uid,
+        sid,
+        JSON.stringify(groupDetails),
+        channel,
+        ets,
+        questionText,
+        questionSource,
+        JSON.stringify(answerText),
+        answer,
       ]
     );
 
-    logger.info(`Processed question data for uid: ${uid}, question: ${questionText?.substring(0, 30)}...`);
+    logger.info(
+      `Processed question data for uid: ${uid}, question: ${questionText?.substring(
+        0,
+        30
+      )}...`
+    );
   } catch (err) {
-    logger.error('Error processing question data:', err);
+    logger.error("Error processing question data:", err);
     throw err;
   }
 }
@@ -486,15 +659,24 @@ async function processFeedbackData(client, event) {
         answer_text, feedback_type
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
-        uid, sid, JSON.stringify(groupDetails), channel, ets,
-        feedbackText, sessionId, questionText,
-        answerText, feedbackType
+        uid,
+        sid,
+        JSON.stringify(groupDetails),
+        channel,
+        ets,
+        feedbackText,
+        sessionId,
+        questionText,
+        answerText,
+        feedbackType,
       ]
     );
 
-    logger.info(`Processed feedback data for uid: ${uid}, feedback type: ${feedbackType}`);
+    logger.info(
+      `Processed feedback data for uid: ${uid}, feedback type: ${feedbackType}`
+    );
   } catch (err) {
-    logger.error('Error processing feedback data:', err);
+    logger.error("Error processing feedback data:", err);
     throw err;
   }
 }
@@ -506,62 +688,211 @@ cron.schedule(CRON_SCHEDULE, async () => {
 });
 
 // API endpoint to manually trigger processing
-app.post('/api/process-logs', async (req, res) => {
+app.post("/api/process-logs", async (req, res) => {
   try {
     const result = await processTelemetryLogs();
     res.status(200).json({
-      message: 'Telemetry log processing triggered successfully',
-      ...result
+      message: "Telemetry log processing triggered successfully",
+      ...result,
     });
   } catch (err) {
-    logger.error('Error triggering telemetry log processing:', err);
-    res.status(500).json({ error: 'Failed to process telemetry logs', details: err.message });
+    logger.error("Error triggering telemetry log processing:", err);
+    res.status(500).json({
+      error: "Failed to process telemetry logs",
+      details: err.message,
+    });
   }
 });
 
 // API endpoint to get configured event processors
-app.get('/api/event-processors', (req, res) => {
-  const processors = Object.keys(eventProcessors).map(eventType => ({
+app.get("/api/event-processors", (req, res) => {
+  const processors = Object.keys(eventProcessors).map((eventType) => ({
     eventType,
-    isActive: true
+    isActive: true,
   }));
 
   res.status(200).json({ processors });
 });
 
 // API endpoint to register a new event processor configuration
-app.post('/api/event-processors', async (req, res) => {
+app.post("/api/event-processors", async (req, res) => {
   try {
-    const { eventType, tableName, fieldMappings } = req.body;
+    const { eventType, tableName, fieldMappings, fieldVerification } = req.body;
 
-    if (!eventType || !tableName || !fieldMappings) {
+    if (!eventType || !tableName || !fieldMappings || !fieldVerification) {
       return res.status(400).json({
-        error: 'Missing required parameters: eventType, tableName, and fieldMappings are required'
+        error:
+          "Missing required parameters: eventType, tableName, and fieldMappings are required",
       });
     }
 
     // Register the new event processor configuration
-    const result = await loadEventProcessors.registerEventProcessor(eventType, tableName, fieldMappings);
-
-    res.status(201).json({
-      message: 'Event processor registered successfully',
+    const result = await loadEventProcessors.registerEventProcessor(
       eventType,
       tableName,
-      ...result
+      fieldMappings
+    );
+
+    res.status(201).json({
+      message: "Event processor registered successfully",
+      eventType,
+      tableName,
+      ...result,
     });
   } catch (err) {
-    logger.error('Error registering event processor:', err);
-    res.status(500).json({ error: 'Failed to register event processor', details: err.message });
+    logger.error("Error registering event processor:", err);
+    res.status(500).json({
+      error: "Failed to register event processor",
+      details: err.message,
+    });
   }
 });
 
 // Health check endpoint
-app.get('/health', (req, res) => {
+app.get("/health", (req, res) => {
   res.status(200).json({
-    status: 'UP',
-    version: process.env.npm_package_version || '1.0.0',
-    eventProcessors: Object.keys(eventProcessors).length
+    status: "UP",
+    version: process.env.npm_package_version || "1.0.0",
+    eventProcessors: Object.keys(eventProcessors).length,
   });
+});
+
+// Function to refresh user location aggregation data
+async function refreshUserLocationAggregation() {
+  const client = await pool.connect();
+  try {
+    logger.info("Starting user location aggregation refresh");
+
+    // Begin transaction
+    await client.query("BEGIN");
+
+    // Clear existing aggregation data
+    await client.query("TRUNCATE TABLE public.user_location_aggr");
+
+    // Insert fresh aggregation data
+    await client.query(`
+      INSERT INTO public.user_location_aggr (
+        unique_id,
+        mobile,
+        username,
+        email,
+        role,
+        farmer_id,
+        registered_location,
+        record_count
+      )
+      SELECT 
+        unique_id,
+        mobile,
+        username,
+        email,
+        role,
+        farmer_id,
+        registered_location,
+        total_count as record_count
+      FROM (
+        SELECT 
+          unique_id,
+          mobile,
+          username,
+          email,
+          role,
+          farmer_id,
+          registered_location,
+          SUM(COUNT(*)) OVER (PARTITION BY unique_id) as total_count,
+          ROW_NUMBER() OVER (PARTITION BY unique_id ORDER BY MAX(created_at) DESC) as rn
+        FROM 
+          public.questions
+        WHERE 
+          created_at >= '2025-10-01 00:00:00'
+          AND unique_id IS NOT NULL
+          AND registered_location IS NOT NULL
+          AND answertext IS NOT NULL
+        GROUP BY 
+          unique_id,
+          mobile,
+          username,
+          email,
+          role,
+          farmer_id,
+          registered_location
+      ) q
+      WHERE q.rn = 1
+    `);
+
+    // Update the leaderboard with fresh data
+    await client.query(`
+      INSERT INTO public.leaderboard (
+        unique_id,
+        mobile,
+        username,
+        email,
+        role,
+        farmer_id,
+        registered_location,
+        record_count,
+        last_updated
+      )
+      SELECT 
+        unique_id,
+        mobile,
+        username,
+        email,
+        role,
+        farmer_id,
+        registered_location,
+        record_count,
+        CURRENT_TIMESTAMP
+      FROM 
+        public.user_location_aggr
+      ON CONFLICT (unique_id) 
+      DO UPDATE SET
+        mobile = EXCLUDED.mobile,
+        username = EXCLUDED.username,
+        email = EXCLUDED.email,
+        role = EXCLUDED.role,
+        farmer_id = EXCLUDED.farmer_id,
+        registered_location = EXCLUDED.registered_location,
+        record_count = EXCLUDED.record_count,
+        last_updated = CURRENT_TIMESTAMP
+    `);
+
+    await client.query("COMMIT");
+    logger.info("User location aggregation refresh completed successfully");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    logger.error("Error refreshing user location aggregation:", err);
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// Schedule leaderboard refresh job to run at 1 AM daily
+cron.schedule(LEADERBOARD_REFRESH_SCHEDULE, async () => {
+  logger.info(
+    `Running scheduled leaderboard refresh (${LEADERBOARD_REFRESH_SCHEDULE})`
+  );
+  try {
+    await refreshUserLocationAggregation();
+  } catch (err) {
+    logger.error("Scheduled leaderboard refresh failed:", err);
+  }
+});
+
+// API endpoint to manually trigger leaderboard refresh
+app.post("/api/refresh-leaderboard", async (req, res) => {
+  try {
+    await refreshUserLocationAggregation();
+    res.status(200).json({
+      message: "Leaderboard refresh completed successfully",
+    });
+  } catch (err) {
+    logger.error("Error triggering leaderboard refresh:", err);
+    res
+      .status(500)
+      .json({ error: "Failed to refresh leaderboard", details: err.message });
+  }
 });
 
 // Start server
@@ -581,16 +912,19 @@ async function startServer() {
     // Run initial processing
     await processTelemetryLogs();
 
+    // Refresh user location aggregation on startup
+    await refreshUserLocationAggregation();
+
     return server;
   } catch (err) {
-    logger.error('Failed to start server:', err);
+    logger.error("Failed to start server:", err);
     process.exit(1);
   }
 }
 
 // Handle shutdown gracefully
-process.on('SIGTERM', () => {
-  logger.info('SIGTERM received, shutting down gracefully');
+process.on("SIGTERM", () => {
+  logger.info("SIGTERM received, shutting down gracefully");
   pool.end();
   process.exit(0);
 });
@@ -601,7 +935,7 @@ module.exports = {
   startServer,
   processTelemetryLogs,
   ensureTablesExist,
-  parseTelemetryMessage
+  parseTelemetryMessage,
 };
 
 // Only start server if this file is run directly (not when required in tests)

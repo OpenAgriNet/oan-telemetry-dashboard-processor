@@ -422,9 +422,9 @@ async function ensureTablesExist() {
           "email": "edata.eks.target.email",
           "role": "edata.eks.target.role",
           "farmer_id": "edata.eks.target.farmer_id",
-          "registered_location": "registered_location",
-          "device_location": "device_location",
-          "agristack_location": "agristack_location"
+          "registered_location": "edata.eks.target.registered_location",
+          "device_location": "edata.eks.target.device_location",
+          "agristack_location": "edata.eks.target.agristack_location"
         }','edata.eks.target.questionsDetails')
       ON CONFLICT DO NOTHING;
     `);
@@ -448,9 +448,9 @@ async function ensureTablesExist() {
           "email": "edata.eks.target.email",
           "role": "edata.eks.target.role",
           "farmer_id": "edata.eks.target.farmer_id",
-          "registered_location": "registered_location",
-          "device_location": "device_location",
-          "agristack_location": "agristack_location"
+          "registered_location": "edata.eks.target.registered_location",
+          "device_location": "edata.eks.target.device_location",
+          "agristack_location": "edata.eks.target.agristack_location"
         }',
         field_verification = 'edata.eks.target.questionsDetails',
         updated_at = NOW()
@@ -473,9 +473,9 @@ async function ensureTablesExist() {
           "email": "edata.eks.target.email",
           "role": "edata.eks.target.role",
           "farmer_id": "edata.eks.target.farmer_id",
-          "registered_location": "registered_location",
-          "device_location": "device_location",
-          "agristack_location": "agristack_location"
+          "registered_location": "edata.eks.target.registered_location",
+          "device_location": "edata.eks.target.device_location",
+          "agristack_location": "edata.eks.target.agristack_location"
         }','edata.eks.target.errorDetails')
       ON CONFLICT DO NOTHING;
     `);
@@ -496,9 +496,9 @@ async function ensureTablesExist() {
           "email": "edata.eks.target.email",
           "role": "edata.eks.target.role",
           "farmer_id": "edata.eks.target.farmer_id",
-          "registered_location": "registered_location",
-          "device_location": "device_location",
-          "agristack_location": "agristack_location"
+          "registered_location": "edata.eks.target.registered_location",
+          "device_location": "edata.eks.target.device_location",
+          "agristack_location": "edata.eks.target.agristack_location"
         }',
         field_verification = 'edata.eks.target.errorDetails',
         updated_at = NOW()
@@ -525,9 +525,9 @@ async function ensureTablesExist() {
           "email": "edata.eks.target.email",
           "role": "edata.eks.target.role",
           "farmer_id": "edata.eks.target.farmer_id",
-          "registered_location": "registered_location",
-          "device_location": "device_location",
-          "agristack_location": "agristack_location"
+          "registered_location": "edata.eks.target.registered_location",
+          "device_location": "edata.eks.target.device_location",
+          "agristack_location": "edata.eks.target.agristack_location"
         }','edata.eks.target.feedbackDetails')
       ON CONFLICT DO NOTHING;
     `);
@@ -552,9 +552,9 @@ async function ensureTablesExist() {
           "email": "edata.eks.target.email",
           "role": "edata.eks.target.role",
           "farmer_id": "edata.eks.target.farmer_id",
-          "registered_location": "registered_location",
-          "device_location": "device_location",
-          "agristack_location": "agristack_location"
+          "registered_location": "edata.eks.target.registered_location",
+          "device_location": "edata.eks.target.device_location",
+          "agristack_location": "edata.eks.target.agristack_location"
         }',
         field_verification = 'edata.eks.target.feedbackDetails',
         updated_at = NOW()
@@ -954,7 +954,7 @@ async function refreshLeaderboardAggregation() {
     client.release();
   }
 }
-refreshLeaderboardAggregation();
+
 
 // Schedule leaderboard refresh job to run at 1 AM daily
 cron.schedule(LEADERBOARD_REFRESH_SCHEDULE, async () => {
@@ -999,6 +999,8 @@ async function startServer() {
 
     // Run initial processing
     await processTelemetryLogs();
+    
+    await refreshLeaderboardAggregation();
     return server;
   } catch (err) {
     logger.error("Failed to start server:", err);

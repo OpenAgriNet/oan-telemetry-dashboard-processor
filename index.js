@@ -13,6 +13,8 @@ const { Pool } = require("pg");
 const cron = require("node-cron");
 const dotenv = require("dotenv");
 const logger = require("./logger");
+const { spawn } = require("child_process");
+
 const {
   eventProcessors,
   loadEventProcessors,
@@ -27,17 +29,6 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
-const BATCH_SIZE = process.env.BATCH_SIZE || 10;
-const CRON_SCHEDULE = process.env.CRON_SCHEDULE || "*/5 * * * *";
-const LEADERBOARD_REFRESH_SCHEDULE =
-  process.env.LEADERBOARD_REFRESH_SCHEDULE || "0 1 * * *"; // Run at 1 AM every day
-
-// PostgreSQL connection pool
-// const pool = new Pool({
-//   connectionString: process.env.DATABASE_URL,
-// });
-
 const pool = new Pool({
   user: process.env.DB_USER,
   host: process.env.DB_HOST,
@@ -49,6 +40,96 @@ const pool = new Pool({
   //   ca: fs.readFileSync(path.join(__dirname, 'certs', 'rds-global.pem')).toString()
   // }
 });
+
+async function ensureVillagesSeeded() {
+  const client = await pool.connect();
+  try {
+    logger.info("Ensuring village_list table exists with expected columns...");
+
+    // Create table with full schema if it does not exist (safe)
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.village_list (
+        village_code INTEGER PRIMARY KEY,
+        taluka_code INTEGER,
+        district_code INTEGER,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // Also ensure columns exist if older table was created with different schema
+    await client.query(`
+      ALTER TABLE public.village_list
+        ADD COLUMN IF NOT EXISTS taluka_code INTEGER,
+        ADD COLUMN IF NOT EXISTS district_code INTEGER,
+        ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+    `);
+
+    // check if table already has data
+    const { rows } = await client.query(
+      "SELECT COUNT(*)::bigint AS cnt FROM public.village_list"
+    );
+    const cnt = Number(rows[0].cnt || 0);
+    logger.info(`village_list row count = ${cnt}`);
+
+    if (cnt > 0) {
+      logger.info("Villages table already seeded — skipping seeder.");
+      return;
+    }
+
+    // spawn the existing seeder script (do not edit the seeder file)
+    logger.info(
+      "Villages table empty — running seeder script (seed_villages_stream.js). This may take some time..."
+    );
+    const seederPath = path.join(__dirname, "seed_villages_stream.js");
+
+    const child = spawn(process.execPath, [seederPath], {
+      stdio: "inherit", // pipe seeder output to main stdout/stderr
+      env: process.env,
+      cwd: __dirname,
+    });
+
+    await new Promise((resolve, reject) => {
+      child.on("error", (err) => {
+        logger.error("Failed to start seeder process:", err);
+        reject(err);
+      });
+      child.on("exit", (code, signal) => {
+        if (code === 0) {
+          logger.info("Seeder completed successfully.");
+          resolve();
+        } else {
+          const msg = `Seeder exited with code ${code}${
+            signal ? " signal " + signal : ""
+          }`;
+          logger.error(msg);
+          reject(new Error(msg));
+        }
+      });
+    });
+  } finally {
+    client.release();
+  }
+}
+
+// call this at startup before starting the server
+(async () => {
+  try {
+    await ensureVillagesSeeded();
+    // continue with the rest of your startup:
+    // await ensureTablesExist();
+    // await loadEventProcessors.loadFromDatabase(pool);
+    // start server...
+  } catch (err) {
+    logger.error("Startup aborted due to seeding failure:", err);
+    process.exit(1);
+  }
+})();
+
+const PORT = process.env.PORT || 3000;
+const BATCH_SIZE = process.env.BATCH_SIZE || 10;
+const CRON_SCHEDULE = process.env.CRON_SCHEDULE || "*/5 * * * *";
+const LEADERBOARD_REFRESH_SCHEDULE =
+  process.env.LEADERBOARD_REFRESH_SCHEDULE || "0 1 * * *"; // Run at 1 AM every day
 
 // Ensure necessary tables exist
 async function ensureTablesExist() {
@@ -102,22 +183,10 @@ async function ensureTablesExist() {
         farmer_id VARCHAR,
         registered_location JSONB,
         record_count INTEGER,
+        village_code BIGINT,
+        taluka_code INTEGER,
+        district_code INTEGER,
         last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (unique_id)
-      )
-    `);
-
-    // Create user-location-aggr table if not exists
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS public.user_location_aggr (
-        unique_id VARCHAR NOT NULL,
-        mobile VARCHAR,
-        username VARCHAR,
-        email VARCHAR,
-        role VARCHAR,
-        farmer_id VARCHAR,
-        registered_location JSONB,
-        record_count INTEGER,
         PRIMARY KEY (unique_id)
       )
     `);
@@ -758,110 +827,100 @@ app.get("/health", (req, res) => {
 });
 
 // Function to refresh user location aggregation data
-async function refreshUserLocationAggregation() {
+const LEADERBOARD_CUTOFF_DATE =
+  process.env.LEADERBOARD_CUTOFF_DATE || "2025-10-01 00:00:00";
+async function refreshLeaderboardAggregation() {
   const client = await pool.connect();
   try {
-    logger.info("Starting user location aggregation refresh");
+    logger.info("Starting leaderboard refresh (most-recent-location)");
 
-    // Begin transaction
     await client.query("BEGIN");
 
-    // Clear existing aggregation data
-    await client.query("TRUNCATE TABLE public.user_location_aggr");
-
-    // Insert fresh aggregation data
+    // 1) Ensure columns exist
     await client.query(`
-      INSERT INTO public.user_location_aggr (
-        unique_id,
-        mobile,
-        username,
-        email,
-        role,
-        farmer_id,
-        registered_location,
-        record_count
-      )
-      SELECT 
-        unique_id,
-        mobile,
-        username,
-        email,
-        role,
-        farmer_id,
-        registered_location,
-        total_count as record_count
-      FROM (
-        SELECT 
-          unique_id,
-          mobile,
-          username,
-          email,
-          role,
-          farmer_id,
-          registered_location,
-          SUM(COUNT(*)) OVER (PARTITION BY unique_id) as total_count,
-          ROW_NUMBER() OVER (PARTITION BY unique_id ORDER BY MAX(created_at) DESC) as rn
-        FROM 
-          public.questions
-        WHERE 
-          created_at >= '2025-10-01 00:00:00'
-          AND unique_id IS NOT NULL
-          AND registered_location IS NOT NULL
-          AND answertext IS NOT NULL
-        GROUP BY 
-          unique_id,
-          mobile,
-          username,
-          email,
-          role,
-          farmer_id,
-          registered_location
-      ) q
-      WHERE q.rn = 1
+      ALTER TABLE public.leaderboard
+        ADD COLUMN IF NOT EXISTS village_code BIGINT,
+        ADD COLUMN IF NOT EXISTS taluka_code INTEGER,
+        ADD COLUMN IF NOT EXISTS district_code INTEGER;
     `);
 
-    // Update the leaderboard with fresh data
-    await client.query(`
+    // 2) Truncate leaderboard (separate statement)
+    await client.query("TRUNCATE TABLE public.leaderboard");
+
+    // 3) Insert aggregated snapshot (single statement with parameter)
+    await client.query(
+      `
+      WITH per_user_lgd AS (
+        SELECT
+          q.unique_id,
+          (q.registered_location->>'lgd_code') AS lgd_code_text,
+          MAX(q.created_at) AS max_created_at,
+          MIN(q.registered_location::text) FILTER (WHERE (q.registered_location->>'lgd_code') IS NOT NULL) AS any_reg_loc_for_lgd,
+          COUNT(*) AS cnt_for_lgd
+        FROM public.questions q
+        WHERE q.created_at >= $1
+          AND q.unique_id IS NOT NULL
+        GROUP BY q.unique_id, (q.registered_location->>'lgd_code')
+      ),
+      best_loc AS (
+        SELECT unique_id, lgd_code_text AS chosen_lgd_code, any_reg_loc_for_lgd
+        FROM (
+          SELECT
+            unique_id,
+            lgd_code_text,
+            any_reg_loc_for_lgd,
+            max_created_at,
+            ROW_NUMBER() OVER (PARTITION BY unique_id ORDER BY max_created_at DESC, lgd_code_text ASC) AS rn
+          FROM per_user_lgd
+        ) t
+        WHERE rn = 1
+      ),
+      totals AS (
+        SELECT
+          q.unique_id,
+          COUNT(*) AS total_count,
+          MAX(q.mobile) AS mobile,
+          MAX(q.username) AS username,
+          MAX(q.email) AS email,
+          MAX(q.role) AS role,
+          MAX(q.farmer_id) AS farmer_id
+        FROM public.questions q
+        WHERE q.created_at >= $1
+          AND q.unique_id IS NOT NULL
+          AND q.answertext IS NOT NULL
+        GROUP BY q.unique_id
+      )
       INSERT INTO public.leaderboard (
-        unique_id,
-        mobile,
-        username,
-        email,
-        role,
-        farmer_id,
-        registered_location,
-        record_count,
-        last_updated
+        unique_id, mobile, username, email, role, farmer_id, registered_location,
+        village_code, taluka_code, district_code, record_count, last_updated
       )
-      SELECT 
-        unique_id,
-        mobile,
-        username,
-        email,
-        role,
-        farmer_id,
-        registered_location,
-        record_count,
-        CURRENT_TIMESTAMP
-      FROM 
-        public.user_location_aggr
-      ON CONFLICT (unique_id) 
-      DO UPDATE SET
-        mobile = EXCLUDED.mobile,
-        username = EXCLUDED.username,
-        email = EXCLUDED.email,
-        role = EXCLUDED.role,
-        farmer_id = EXCLUDED.farmer_id,
-        registered_location = EXCLUDED.registered_location,
-        record_count = EXCLUDED.record_count,
-        last_updated = CURRENT_TIMESTAMP
-    `);
+      SELECT
+        t.unique_id,
+        t.mobile,
+        t.username,
+        t.email,
+        t.role,
+        t.farmer_id,
+        CASE WHEN b.any_reg_loc_for_lgd IS NOT NULL THEN (b.any_reg_loc_for_lgd)::jsonb ELSE NULL END AS registered_location,
+        v.village_code,
+        v.taluka_code,
+        v.district_code,
+        t.total_count AS record_count,
+        CURRENT_TIMESTAMP AS last_updated
+      FROM totals t
+      LEFT JOIN best_loc b ON t.unique_id = b.unique_id
+      LEFT JOIN public.village_list v ON b.chosen_lgd_code = v.village_code::text;
+      `,
+      [LEADERBOARD_CUTOFF_DATE]
+    );
 
     await client.query("COMMIT");
-    logger.info("User location aggregation refresh completed successfully");
+    logger.info(
+      "Leaderboard refresh completed successfully (most-recent-location)."
+    );
   } catch (err) {
     await client.query("ROLLBACK");
-    logger.error("Error refreshing user location aggregation:", err);
+    logger.error("Error refreshing leaderboard (most-recent-location):", err);
     throw err;
   } finally {
     client.release();
@@ -874,7 +933,7 @@ cron.schedule(LEADERBOARD_REFRESH_SCHEDULE, async () => {
     `Running scheduled leaderboard refresh (${LEADERBOARD_REFRESH_SCHEDULE})`
   );
   try {
-    await refreshUserLocationAggregation();
+    await refreshLeaderboardAggregation();
   } catch (err) {
     logger.error("Scheduled leaderboard refresh failed:", err);
   }
@@ -883,7 +942,7 @@ cron.schedule(LEADERBOARD_REFRESH_SCHEDULE, async () => {
 // API endpoint to manually trigger leaderboard refresh
 app.post("/api/refresh-leaderboard", async (req, res) => {
   try {
-    await refreshUserLocationAggregation();
+    await refreshLeaderboardAggregation();
     res.status(200).json({
       message: "Leaderboard refresh completed successfully",
     });
@@ -912,9 +971,7 @@ async function startServer() {
     // Run initial processing
     await processTelemetryLogs();
 
-    // Refresh user location aggregation on startup
-    await refreshUserLocationAggregation();
-
+    await refreshLeaderboardAggregation();
     return server;
   } catch (err) {
     logger.error("Failed to start server:", err);

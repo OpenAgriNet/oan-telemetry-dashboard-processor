@@ -131,23 +131,6 @@ const CRON_SCHEDULE = process.env.CRON_SCHEDULE || "*/5 * * * *";
 const LEADERBOARD_REFRESH_SCHEDULE =
   process.env.LEADERBOARD_REFRESH_SCHEDULE || "0 1 * * *"; // Run at 1 AM every day
 
-// PostgreSQL connection pool
-// const pool = new Pool({
-//   connectionString: process.env.DATABASE_URL,
-// });
-
-// const pool = new Pool({
-//   user: process.env.DB_USER,
-//   host: process.env.DB_HOST,
-//   database: process.env.DB_NAME,
-//   password: process.env.DB_PASSWORD,
-//   port: parseInt(process.env.DB_PORT || "5432", 10),
-//   // ssl: {
-//   //   rejectUnauthorized: true,
-//   //   ca: fs.readFileSync(path.join(__dirname, 'certs', 'rds-global.pem')).toString()
-//   // }
-// });
-
 // Ensure necessary tables exist
 async function ensureTablesExist() {
   const client = await pool.connect();
@@ -200,22 +183,10 @@ async function ensureTablesExist() {
         farmer_id VARCHAR,
         registered_location JSONB,
         record_count INTEGER,
+        village_code BIGINT,
+        taluka_code INTEGER,
+        district_code INTEGER,
         last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (unique_id)
-      )
-    `);
-
-    // Create user-location-aggr table if not exists
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS public.user_location_aggr (
-        unique_id VARCHAR NOT NULL,
-        mobile VARCHAR,
-        username VARCHAR,
-        email VARCHAR,
-        role VARCHAR,
-        farmer_id VARCHAR,
-        registered_location JSONB,
-        record_count INTEGER,
         PRIMARY KEY (unique_id)
       )
     `);
@@ -916,6 +887,7 @@ async function refreshLeaderboardAggregation() {
         FROM public.questions q
         WHERE q.created_at >= $1
           AND q.unique_id IS NOT NULL
+          AND q.answertext IS NOT NULL
         GROUP BY q.unique_id
       )
       INSERT INTO public.leaderboard (
@@ -954,7 +926,6 @@ async function refreshLeaderboardAggregation() {
     client.release();
   }
 }
-refreshLeaderboardAggregation();
 
 // Schedule leaderboard refresh job to run at 1 AM daily
 cron.schedule(LEADERBOARD_REFRESH_SCHEDULE, async () => {
@@ -999,6 +970,7 @@ async function startServer() {
 
     // Run initial processing
     await processTelemetryLogs();
+    await refreshLeaderboardAggregation();
     return server;
   } catch (err) {
     logger.error("Failed to start server:", err);

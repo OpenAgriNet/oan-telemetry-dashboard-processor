@@ -191,6 +191,10 @@ async function ensureTablesExist() {
       )
     `);
 
+    await client.query(`
+      ALTER TABLE public.questions
+  ADD COLUMN IF NOT EXISTS is_new SMALLINT DEFAULT 0 NOT NULL;`)
+
     // Add missing columns to questions table if they don't exist
     await client.query(`
       DO $$ 
@@ -675,23 +679,53 @@ async function processQuestionData(client, event) {
     const answer = answerText?.answer;
 
     // Insert data into questions table
+    // await client.query(
+    //   `INSERT INTO questions (
+    //     uid, sid, group_details, channel, ets, 
+    //     question_text, question_source, answer_text, answer, is_new
+    //   ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+    //   [
+    //     uid,
+    //     sid,
+    //     JSON.stringify(groupDetails),
+    //     channel,
+    //     ets,
+    //     questionText,
+    //     questionSource,
+    //     JSON.stringify(answerText),
+    //     answer,
+    //   ]
+    // );
+
     await client.query(
-      `INSERT INTO questions (
-        uid, sid, group_details, channel, ets, 
-        question_text, question_source, answer_text, answer
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      [
-        uid,
-        sid,
-        JSON.stringify(groupDetails),
-        channel,
-        ets,
-        questionText,
-        questionSource,
-        JSON.stringify(answerText),
-        answer,
-      ]
-    );
+  `
+  INSERT INTO questions (
+    uid, sid, groupdetails, channel, ets, 
+    questiontext, questionsource, answertext, answer, is_new
+  )
+  SELECT
+    $1, $2, $3, $4, $5, $6, $7, $8, $9,
+    CASE
+      WHEN NOT EXISTS (
+        SELECT 1 FROM questions q
+        WHERE q.uid = $1
+      )
+      THEN 1
+      ELSE 0
+    END
+  `,
+  [
+    uid,
+    sid,
+    JSON.stringify(groupDetails),
+    channel,
+    ets,
+    questionText,
+    questionSource,
+    JSON.stringify(answerText),
+    answer,
+  ]
+);
 
     logger.info(
       `Processed question data for uid: ${uid}, question: ${questionText?.substring(
@@ -954,11 +988,61 @@ app.post("/api/refresh-leaderboard", async (req, res) => {
   }
 });
 
+// Backfill is_new = 1 for earliest qualifying row per uid
+async function backfillIsNew() {
+  const client = await pool.connect();
+  try {
+    logger.info("Starting backfill: computing is_new for questions table...");
+
+    await client.query("BEGIN");
+
+    // Reset all to 0 (idempotent)
+    await client.query(`
+      UPDATE public.questions
+      SET is_new = 0
+      WHERE is_new IS DISTINCT FROM 0;
+    `);
+
+    // Mark earliest qualifying row per uid as is_new = 1
+    await client.query(`
+      WITH first_per_uid AS (
+        SELECT id
+        FROM (
+          SELECT id,
+                 ROW_NUMBER() OVER (PARTITION BY uid ORDER BY created_at ASC, id ASC) AS rn
+          FROM public.questions q
+          WHERE q.uid IS NOT NULL
+            AND q.answertext IS NOT NULL
+            AND q.sid IS NOT NULL
+            AND q.ets IS NOT NULL
+        ) t
+        WHERE rn = 1
+      )
+      UPDATE public.questions q
+      SET is_new = 1
+      FROM first_per_uid f
+      WHERE q.id = f.id;
+    `);
+
+    await client.query("COMMIT");
+    logger.info("Backfill completed: is_new marked.");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    logger.error("Backfill failed:", err);
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 // Start server
 async function startServer() {
   try {
     // Ensure database tables exist
     await ensureTablesExist();
+
+    // for new user and returning users
+    await backfillIsNew();
 
     // Load configured event processors
     await loadEventProcessors.loadFromDatabase(pool);

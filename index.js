@@ -130,6 +130,7 @@ const BATCH_SIZE = process.env.BATCH_SIZE || 10;
 const CRON_SCHEDULE = process.env.CRON_SCHEDULE || "*/5 * * * *";
 const LEADERBOARD_REFRESH_SCHEDULE =
   process.env.LEADERBOARD_REFRESH_SCHEDULE || "0 1 * * *"; // Run at 1 AM every day
+const IS_NEW_BACKFILL_SCHEDULE = process.env.IS_NEW_BACKFILL_SCHEDULE || "*/30 * * * *" ; // Run every 30 minutes
 
 // Ensure necessary tables exist
 async function ensureTablesExist() {
@@ -788,6 +789,17 @@ async function processFeedbackData(client, event) {
 cron.schedule(CRON_SCHEDULE, async () => {
   logger.info(`Running scheduled telemetry log processing (${CRON_SCHEDULE})`);
   await processTelemetryLogs();
+});
+
+// Run the existing backfillIsNew() every 30 minutes (minimal)
+cron.schedule(IS_NEW_BACKFILL_SCHEDULE, async () => {
+  try {
+    logger.info('Scheduled backfillIsNew: starting (every 30 minutes)');
+    await backfillIsNew();
+    logger.info('Scheduled backfillIsNew: completed');
+  } catch (err) {
+    logger.error('Scheduled backfillIsNew: failed', err);
+  }
 });
 
 // API endpoint to manually trigger processing

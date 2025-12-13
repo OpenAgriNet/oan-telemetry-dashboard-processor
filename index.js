@@ -710,6 +710,7 @@ async function processQuestionData(client, event) {
       WHEN NOT EXISTS (
         SELECT 1 FROM questions q
         WHERE q.uid = $1
+        LIMIT 1
       )
       THEN 1
       ELSE 0

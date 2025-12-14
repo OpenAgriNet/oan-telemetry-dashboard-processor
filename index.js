@@ -793,15 +793,15 @@ cron.schedule(CRON_SCHEDULE, async () => {
 });
 
 // Run the existing backfillIsNew() every 30 minutes (minimal)
-cron.schedule(IS_NEW_BACKFILL_SCHEDULE, async () => {
-  try {
-    logger.info('Scheduled backfillIsNew: starting (every 30 minutes)');
-    await backfillIsNew();
-    logger.info('Scheduled backfillIsNew: completed');
-  } catch (err) {
-    logger.error('Scheduled backfillIsNew: failed', err);
-  }
-});
+// cron.schedule(IS_NEW_BACKFILL_SCHEDULE, async () => {
+//   try {
+//     logger.info('Scheduled backfillIsNew: starting (every 30 minutes)');
+//     await backfillIsNew();
+//     logger.info('Scheduled backfillIsNew: completed');
+//   } catch (err) {
+//     logger.error('Scheduled backfillIsNew: failed', err);
+//   }
+// });
 
 // API endpoint to manually trigger processing
 app.post("/api/process-logs", async (req, res) => {
@@ -1002,51 +1002,51 @@ app.post("/api/refresh-leaderboard", async (req, res) => {
 });
 
 // Backfill is_new = 1 for earliest qualifying row per uid
-async function backfillIsNew() {
-  const client = await pool.connect();
-  try {
-    logger.info("Starting backfill: computing is_new for questions table...");
+// async function backfillIsNew() {
+//   const client = await pool.connect();
+//   try {
+//     logger.info("Starting backfill: computing is_new for questions table...");
 
-    await client.query("BEGIN");
+//     await client.query("BEGIN");
 
-    // Reset all to 0 (idempotent)
-    await client.query(`
-      UPDATE public.questions
-      SET is_new = 0
-      WHERE is_new IS DISTINCT FROM 0;
-    `);
+//     // Reset all to 0 (idempotent)
+//     await client.query(`
+//       UPDATE public.questions
+//       SET is_new = 0
+//       WHERE is_new IS DISTINCT FROM 0;
+//     `);
 
-    // Mark earliest qualifying row per uid as is_new = 1
-    await client.query(`
-      WITH first_per_uid AS (
-        SELECT id
-        FROM (
-          SELECT id,
-                 ROW_NUMBER() OVER (PARTITION BY uid ORDER BY created_at ASC, id ASC) AS rn
-          FROM public.questions q
-          WHERE q.uid IS NOT NULL
-            AND q.answertext IS NOT NULL
-            AND q.sid IS NOT NULL
-            AND q.ets IS NOT NULL
-        ) t
-        WHERE rn = 1
-      )
-      UPDATE public.questions q
-      SET is_new = 1
-      FROM first_per_uid f
-      WHERE q.id = f.id;
-    `);
+//     // Mark earliest qualifying row per uid as is_new = 1
+//     await client.query(`
+//       WITH first_per_uid AS (
+//         SELECT id
+//         FROM (
+//           SELECT id,
+//                  ROW_NUMBER() OVER (PARTITION BY uid ORDER BY created_at ASC, id ASC) AS rn
+//           FROM public.questions q
+//           WHERE q.uid IS NOT NULL
+//             AND q.answertext IS NOT NULL
+//             AND q.sid IS NOT NULL
+//             AND q.ets IS NOT NULL
+//         ) t
+//         WHERE rn = 1
+//       )
+//       UPDATE public.questions q
+//       SET is_new = 1
+//       FROM first_per_uid f
+//       WHERE q.id = f.id;
+//     `);
 
-    await client.query("COMMIT");
-    logger.info("Backfill completed: is_new marked.");
-  } catch (err) {
-    await client.query("ROLLBACK");
-    logger.error("Backfill failed:", err);
-    throw err;
-  } finally {
-    client.release();
-  }
-}
+//     await client.query("COMMIT");
+//     logger.info("Backfill completed: is_new marked.");
+//   } catch (err) {
+//     await client.query("ROLLBACK");
+//     logger.error("Backfill failed:", err);
+//     throw err;
+//   } finally {
+//     client.release();
+//   }
+// }
 
 // Start server
 async function startServer() {
@@ -1055,7 +1055,7 @@ async function startServer() {
     await ensureTablesExist();
 
     // for new user and returning users
-    await backfillIsNew();
+    // await backfillIsNew();
 
     // Load configured event processors
     await loadEventProcessors.loadFromDatabase(pool);

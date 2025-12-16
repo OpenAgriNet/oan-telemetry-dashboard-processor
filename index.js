@@ -700,21 +700,16 @@ async function processQuestionData(client, event) {
 
     await client.query(
   `
-  INSERT INTO questions (
-    uid, sid, groupdetails, channel, ets, 
-    questiontext, questionsource, answertext, answer, is_new
-  )
-  SELECT
-    $1, $2, $3, $4, $5, $6, $7, $8, $9,
-    CASE
-      WHEN NOT EXISTS (
-        SELECT 1 FROM questions q
-        WHERE q.uid = $1
-        LIMIT 1
-      )
-      THEN 1
-      ELSE 0
-    END
+ INSERT INTO questions (
+  uid, sid, groupdetails, channel, ets,
+  questiontext, questionsource, answertext, answer, is_new
+)
+VALUES (
+  $1, $2, $3, $4, $5, $6, $7, $8, $9, 1
+)
+ON CONFLICT (uid)
+DO UPDATE
+SET is_new = 0;
   `,
   [
     uid,

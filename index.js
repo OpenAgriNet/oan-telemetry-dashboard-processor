@@ -662,7 +662,7 @@ async function processTelemetryLogs() {
   }
 }
 
-// process event processors
+// question
 // Process OE_ITEM_RESPONSE data
 async function processQuestionData(client, event) {
   try {

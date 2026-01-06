@@ -566,26 +566,42 @@ async function ensureTablesExist() {
 }
 
 // Parse telemetry message JSON
-function parseTelemetryMessage(message) {
+function parseTelemetryMessage(message, batchId = '', logIndex = 0) {
   try {
+    logger.debug(`[${batchId}] [Log ${logIndex}] Parsing telemetry message (length: ${message?.length || 0} chars)`);
     // Parse the message string which is a JSON string
     const parsedMessage = JSON.parse(message);
     // Return the events array from the parsed message
-    return parsedMessage.events || [];
+    const events = parsedMessage.events || [];
+    logger.debug(`[${batchId}] [Log ${logIndex}] Successfully parsed message, found ${events.length} events`);
+    return events;
   } catch (err) {
-    logger.error("Error parsing telemetry message:", err);
+    const messagePreview = message?.substring(0, 100) || 'empty';
+    logger.error(`[${batchId}] [Log ${logIndex}] Error parsing telemetry message: ${err.message}`);
+    logger.error(`[${batchId}] [Log ${logIndex}] Message preview: ${messagePreview}...`);
     return [];
   }
 }
 
 // Process telemetry logs
-async function processTelemetryLogs() {
+async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
+  logger.info(`[${batchId}] Step 1: Acquiring database connection...`);
   const client = await pool.connect();
+  logger.info(`[${batchId}] Step 1: Database connection acquired`);
+  
+  let processedCount = 0;
+  let totalEventsProcessed = 0;
+  let deadLetterCount = 0;
+  
   try {
     // Begin transaction
+    logger.info(`[${batchId}] Step 2: Beginning database transaction...`);
     await client.query("BEGIN");
+    logger.info(`[${batchId}] Step 2: Transaction started`);
 
     // Get unprocessed logs
+    logger.info(`[${batchId}] Step 3: Fetching unprocessed logs (BATCH_SIZE: ${BATCH_SIZE})...`);
+    const queryStartTime = Date.now();
     const result = await client.query(
       `SELECT  level, message, meta, cast(to_char(("timestamp")::TIMESTAMP,'yyyymmddhhmiss') as BigInt) as timestamp, sync_status FROM winston_logs 
        WHERE sync_status = 0 
@@ -593,72 +609,123 @@ async function processTelemetryLogs() {
        LIMIT $1`,
       [BATCH_SIZE]
     );
+    const queryDuration = Date.now() - queryStartTime;
+    logger.info(`[${batchId}] Step 3: Query completed in ${queryDuration}ms, found ${result.rows.length} logs`);
+    
     if (result.rows.length === 0) {
-      logger.info("No new telemetry logs to process");
+      logger.info(`[${batchId}] Step 4: No new telemetry logs to process - committing empty transaction`);
       await client.query("COMMIT");
+      logger.info(`[${batchId}] Step 4: Empty transaction committed`);
       return { processed: 0, status: "success" };
     }
 
-    logger.info(`Processing ${result.rows.length} telemetry logs`);
+    logger.info(`[${batchId}] Step 4: Starting to process ${result.rows.length} telemetry logs`);
 
     // Process each log
-    for (const log of result.rows) {
-      const events = parseTelemetryMessage(log.message);
+    for (let logIndex = 0; logIndex < result.rows.length; logIndex++) {
+      const log = result.rows[logIndex];
+      const logStartTime = Date.now();
+      logger.info(`[${batchId}] [Log ${logIndex + 1}/${result.rows.length}] Processing log (timestamp: ${log.timestamp}, level: ${log.level})`);
+      
+      const events = parseTelemetryMessage(log.message, batchId, logIndex + 1);
+      logger.info(`[${batchId}] [Log ${logIndex + 1}] Parsed ${events.length} events from message`);
 
-      //console.log(JSON.stringify(eventProcessors));
-      for (const event of events) {
+      if (events.length === 0) {
+        logger.warn(`[${batchId}] [Log ${logIndex + 1}] No events found in message - skipping to sync status update`);
+      }
+
+      for (let eventIndex = 0; eventIndex < events.length; eventIndex++) {
+        const event = events[eventIndex];
         const eventType = event.eid;
-        let eventProssed = false;
+        const eventUid = event.uid || 'unknown';
+        logger.debug(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}/${events.length}] Processing event type: ${eventType}, uid: ${eventUid}`);
+        
+        let eventProcessed = false;
+        let matchedProcessor = null;
+        
         for (const key in eventProcessors) {
           const processor = eventProcessors[key];
           const verified = getNestedValue(
             event,
             processor["fieldVerification"]
           );
+          
+          logger.debug(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] Checking processor '${key}': eventType match=${processor["eventType"] === eventType}, verified=${verified !== undefined}`);
+          
           if (
             processor["eventType"] === eventType &&
             verified !== undefined &&
-            !eventProssed
+            !eventProcessed
           ) {
-            eventProssed = true;
+            matchedProcessor = key;
+            logger.info(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] Matched processor '${key}' for event type '${eventType}'`);
+            
+            const processorStartTime = Date.now();
             await processor["process"](client, event);
-            eventProssed = true;
+            const processorDuration = Date.now() - processorStartTime;
+            
+            logger.info(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] Processor '${key}' completed in ${processorDuration}ms`);
+            eventProcessed = true;
+            totalEventsProcessed++;
             break;
           }
         }
+        
         if (
           eventType !== "OE_END" &&
           eventType !== "OE_START" &&
-          eventProssed === false
+          eventProcessed === false
         ) {
-          logger.debug(`No processor defined for event type: ${eventType}`);
+          logger.warn(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] No processor matched for event type: ${eventType} - sending to dead letter queue`);
+          logger.debug(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] Dead letter event uid: ${eventUid}, channel: ${event.channel || 'unknown'}`);
 
           await client.query(
             `Insert into dead_letter_logs(level, message, meta, event_name) values ($1, $2, $3, $4)`,
             [log.level, JSON.stringify(event), log.meta, eventType]
           );
+          deadLetterCount++;
+          logger.info(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] Event inserted into dead_letter_logs`);
+        } else if (eventType === "OE_END" || eventType === "OE_START") {
+          logger.debug(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] Skipping system event type: ${eventType}`);
         }
-        // Check if we have a processor for this event type
       }
+      
       // Update sync status for processed log
-      //console.log(`Updating sync status for log with timestamp: ${log.timestamp}`);
-      //console.log(`select * from winston_logs WHERE "timestamp" = ${log.timestamp} AND message = ${log.message}`);
+      logger.debug(`[${batchId}] [Log ${logIndex + 1}] Updating sync_status to 1 for processed log...`);
       await client.query(
         `UPDATE winston_logs SET sync_status = 1 WHERE cast(to_char(("timestamp")::TIMESTAMP,'yyyymmddhhmiss') as BigInt) = $1  AND message = $2`,
         [log.timestamp, log.message]
       );
+      
+      const logDuration = Date.now() - logStartTime;
+      processedCount++;
+      logger.info(`[${batchId}] [Log ${logIndex + 1}] Log processing completed in ${logDuration}ms, sync_status updated`);
     }
 
     // Commit transaction
+    logger.info(`[${batchId}] Step 5: Committing transaction...`);
     await client.query("COMMIT");
-    logger.info(`Successfully processed ${result.rows.length} telemetry logs`);
-    return { processed: result.rows.length, status: "success" };
+    logger.info(`[${batchId}] Step 5: Transaction committed successfully`);
+    
+    logger.info(`[${batchId}] ========== PROCESSING SUMMARY ==========`);
+    logger.info(`[${batchId}] Logs processed: ${processedCount}`);
+    logger.info(`[${batchId}] Total events processed: ${totalEventsProcessed}`);
+    logger.info(`[${batchId}] Dead letter events: ${deadLetterCount}`);
+    logger.info(`[${batchId}] ==========================================`);
+    
+    return { processed: result.rows.length, status: "success", eventsProcessed: totalEventsProcessed, deadLetterCount };
   } catch (err) {
+    logger.error(`[${batchId}] Step ERROR: Rolling back transaction due to error...`);
     await client.query("ROLLBACK");
-    logger.error("Error processing telemetry logs:", err);
+    logger.error(`[${batchId}] Step ERROR: Transaction rolled back`);
+    logger.error(`[${batchId}] Error details: ${err.message}`);
+    logger.error(`[${batchId}] Error stack: ${err.stack}`);
+    logger.error(`[${batchId}] Processed before error: ${processedCount} logs, ${totalEventsProcessed} events`);
     return { processed: 0, status: "error", error: err.message };
   } finally {
+    logger.info(`[${batchId}] Step FINAL: Releasing database connection...`);
     client.release();
+    logger.info(`[${batchId}] Step FINAL: Database connection released`);
   }
 }
 
@@ -784,8 +851,21 @@ async function processFeedbackData(client, event) {
 
 // Schedule telemetry processing with configurable cron schedule
 cron.schedule(CRON_SCHEDULE, async () => {
-  logger.info(`Running scheduled telemetry log processing (${CRON_SCHEDULE})`);
-  await processTelemetryLogs();
+  const batchId = `batch_${Date.now()}`;
+  const cronStartTime = Date.now();
+  logger.info(`[${batchId}] ========== CRON JOB STARTED ==========`);
+  logger.info(`[${batchId}] Schedule: ${CRON_SCHEDULE}, Batch Size: ${BATCH_SIZE}`);
+  
+  try {
+    const result = await processTelemetryLogs(batchId);
+    const duration = Date.now() - cronStartTime;
+    logger.info(`[${batchId}] ========== CRON JOB COMPLETED ==========`);
+    logger.info(`[${batchId}] Duration: ${duration}ms, Processed: ${result.processed}, Status: ${result.status}`);
+  } catch (err) {
+    const duration = Date.now() - cronStartTime;
+    logger.error(`[${batchId}] ========== CRON JOB FAILED ==========`);
+    logger.error(`[${batchId}] Duration: ${duration}ms, Error: ${err.message}`);
+  }
 });
 
 // Run the existing backfillIsNew() every 30 minutes (minimal)
@@ -801,16 +881,21 @@ cron.schedule(CRON_SCHEDULE, async () => {
 
 // API endpoint to manually trigger processing
 app.post("/api/process-logs", async (req, res) => {
+  const batchId = `manual_${Date.now()}`;
+  logger.info(`[${batchId}] Manual trigger received via API`);
   try {
-    const result = await processTelemetryLogs();
+    const result = await processTelemetryLogs(batchId);
+    logger.info(`[${batchId}] Manual trigger completed successfully`);
     res.status(200).json({
       message: "Telemetry log processing triggered successfully",
+      batchId,
       ...result,
     });
   } catch (err) {
-    logger.error("Error triggering telemetry log processing:", err);
+    logger.error(`[${batchId}] Error triggering telemetry log processing:`, err);
     res.status(500).json({
       error: "Failed to process telemetry logs",
+      batchId,
       details: err.message,
     });
   }
@@ -1062,7 +1147,8 @@ async function startServer() {
     });
 
     // Run initial processing
-    await processTelemetryLogs();
+    logger.info('Running initial telemetry log processing on startup...');
+    await processTelemetryLogs(`startup_${Date.now()}`);
 
     await refreshLeaderboardAggregation();
     return server;

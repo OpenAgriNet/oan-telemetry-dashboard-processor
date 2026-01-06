@@ -638,7 +638,8 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
         const event = events[eventIndex];
         const eventType = event.eid;
         const eventUid = event.uid || 'unknown';
-        logger.debug(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}/${events.length}] Processing event type: ${eventType}, uid: ${eventUid}`);
+        const eventMid = event.mid || 'unknown';
+        logger.debug(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}/${events.length}] Processing event type: ${eventType}, uid: ${eventUid}, mid: ${eventMid}`);
         
         let eventProcessed = false;
         let matchedProcessor = null;
@@ -658,13 +659,13 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
             !eventProcessed
           ) {
             matchedProcessor = key;
-            logger.info(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] Matched processor '${key}' for event type '${eventType}'`);
+            logger.info(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] mid: ${eventMid} - Matched processor '${key}' for event type '${eventType}'`);
             
             const processorStartTime = Date.now();
             await processor["process"](client, event);
             const processorDuration = Date.now() - processorStartTime;
             
-            logger.info(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] Processor '${key}' completed in ${processorDuration}ms`);
+            logger.info(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] mid: ${eventMid} - Processor '${key}' completed in ${processorDuration}ms`);
             eventProcessed = true;
             totalEventsProcessed++;
             break;
@@ -676,8 +677,8 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
           eventType !== "OE_START" &&
           eventProcessed === false
         ) {
-          logger.warn(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] No processor matched for event type: ${eventType} - sending to dead letter queue`);
-          logger.debug(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] Dead letter event uid: ${eventUid}, channel: ${event.channel || 'unknown'}`);
+          logger.warn(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] mid: ${eventMid} - No processor matched for event type: ${eventType} - sending to dead letter queue`);
+          logger.debug(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] mid: ${eventMid} - Dead letter event uid: ${eventUid}, channel: ${event.channel || 'unknown'}`);
 
           await client.query(
             `Insert into dead_letter_logs(level, message, meta, event_name) values ($1, $2, $3, $4)`,
@@ -849,10 +850,25 @@ async function processFeedbackData(client, event) {
   }
 }
 
+// Lock to prevent concurrent cron runs
+let isProcessingLogs = false;
+let currentBatchId = null;
+
 // Schedule telemetry processing with configurable cron schedule
 cron.schedule(CRON_SCHEDULE, async () => {
+  // Check if already processing
+  if (isProcessingLogs) {
+    logger.warn(`[CRON] Skipping scheduled run - previous batch [${currentBatchId}] still in progress`);
+    return;
+  }
+  
   const batchId = `batch_${Date.now()}`;
   const cronStartTime = Date.now();
+  
+  // Acquire lock
+  isProcessingLogs = true;
+  currentBatchId = batchId;
+  
   logger.info(`[${batchId}] ========== CRON JOB STARTED ==========`);
   logger.info(`[${batchId}] Schedule: ${CRON_SCHEDULE}, Batch Size: ${BATCH_SIZE}`);
   
@@ -865,6 +881,11 @@ cron.schedule(CRON_SCHEDULE, async () => {
     const duration = Date.now() - cronStartTime;
     logger.error(`[${batchId}] ========== CRON JOB FAILED ==========`);
     logger.error(`[${batchId}] Duration: ${duration}ms, Error: ${err.message}`);
+  } finally {
+    // Release lock
+    isProcessingLogs = false;
+    currentBatchId = null;
+    logger.info(`[${batchId}] Lock released`);
   }
 });
 
@@ -1148,7 +1169,7 @@ async function startServer() {
 
     // Run initial processing
     logger.info('Running initial telemetry log processing on startup...');
-    await processTelemetryLogs(`startup_${Date.now()}`);
+    await processTelemetryLogs(`process_${Date.now()}`);
 
     await refreshLeaderboardAggregation();
     return server;

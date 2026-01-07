@@ -603,7 +603,7 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
     logger.info(`[${batchId}] Step 3: Fetching unprocessed logs (BATCH_SIZE: ${BATCH_SIZE})...`);
     const queryStartTime = Date.now();
     const result = await client.query(
-      `SELECT level, message, meta, cast(to_char(("timestamp")::TIMESTAMP,'yyyymmddhhmiss') as BigInt) as timestamp, meta->>'mid' as mid, sync_status FROM winston_logs 
+      `SELECT id, level, message, meta, cast(to_char(("timestamp")::TIMESTAMP,'yyyymmddhhmiss') as BigInt) as timestamp, sync_status FROM winston_logs 
        WHERE sync_status = 0 
        ORDER BY "timestamp" ASC 
        LIMIT $1`,
@@ -694,8 +694,8 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
       // Update sync status for processed log
       logger.debug(`[${batchId}] [Log ${logIndex + 1}] Updating sync_status to 1 for processed log...`);
       await client.query(
-        `UPDATE winston_logs SET sync_status = 1 WHERE meta->>'mid' = $1`,
-        [log.mid]
+        `UPDATE winston_logs SET sync_status = 1 WHERE id = $1`,
+        [log.id]
       );
       
       const logDuration = Date.now() - logStartTime;

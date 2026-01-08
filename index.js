@@ -131,6 +131,7 @@ const CRON_SCHEDULE = process.env.CRON_SCHEDULE || "*/5 * * * *";
 const LEADERBOARD_REFRESH_SCHEDULE =
   process.env.LEADERBOARD_REFRESH_SCHEDULE || "0 1 * * *"; // Run at 1 AM every day
 const IS_NEW_BACKFILL_SCHEDULE = process.env.IS_NEW_BACKFILL_SCHEDULE || "*/30 * * * *" ; // Run every 30 minutes
+const MV_REFRESH_SCHEDULE = process.env.MV_REFRESH_SCHEDULE || "*/15 * * * *"; // Refresh materialized views every 15 minutes
 
 // Ensure necessary tables exist
 async function ensureTablesExist() {
@@ -1103,6 +1104,97 @@ app.post("/api/refresh-leaderboard", async (req, res) => {
   }
 });
 
+// =============================================================================
+// MATERIALIZED VIEW REFRESH FOR NEW/RETURNING USERS
+// =============================================================================
+// These views pre-compute new vs returning user stats for fast dashboard queries
+// - mv_user_first_activity: stores first activity date per user
+// - mv_daily_new_returning_users: daily breakdown of new vs returning users
+
+// Lock to prevent concurrent MV refresh runs
+let isRefreshingMaterializedViews = false;
+
+/**
+ * Refresh materialized views for new/returning users analytics
+ * Refreshes views CONCURRENTLY to avoid locking reads
+ */
+async function refreshMaterializedViews() {
+  const client = await pool.connect();
+  const startTime = Date.now();
+  
+  try {
+    logger.info("[MV_REFRESH] Starting materialized views refresh...");
+    
+    // Check if materialized views exist before attempting refresh
+    const viewCheck = await client.query(`
+      SELECT matviewname FROM pg_matviews 
+      WHERE schemaname = 'public' 
+      AND matviewname IN ('mv_user_first_activity', 'mv_daily_new_returning_users')
+    `);
+    
+    const existingViews = viewCheck.rows.map(r => r.matviewname);
+    
+    if (existingViews.length === 0) {
+      logger.warn("[MV_REFRESH] No materialized views found. Please run the CREATE MATERIALIZED VIEW statements first.");
+      return { status: "skipped", reason: "views_not_found" };
+    }
+    
+    // Refresh mv_user_first_activity first (foundation view)
+    if (existingViews.includes('mv_user_first_activity')) {
+      logger.info("[MV_REFRESH] Refreshing mv_user_first_activity...");
+      const mv1Start = Date.now();
+      await client.query("REFRESH MATERIALIZED VIEW CONCURRENTLY mv_user_first_activity");
+      logger.info(`[MV_REFRESH] mv_user_first_activity refreshed in ${Date.now() - mv1Start}ms`);
+    }
+    
+    // Refresh mv_daily_new_returning_users (depends on first view)
+    if (existingViews.includes('mv_daily_new_returning_users')) {
+      logger.info("[MV_REFRESH] Refreshing mv_daily_new_returning_users...");
+      const mv2Start = Date.now();
+      await client.query("REFRESH MATERIALIZED VIEW CONCURRENTLY mv_daily_new_returning_users");
+      logger.info(`[MV_REFRESH] mv_daily_new_returning_users refreshed in ${Date.now() - mv2Start}ms`);
+    }
+    
+    const totalDuration = Date.now() - startTime;
+    logger.info(`[MV_REFRESH] All materialized views refreshed successfully in ${totalDuration}ms`);
+    
+    return { 
+      status: "success", 
+      duration: totalDuration,
+      refreshedViews: existingViews 
+    };
+    
+  } catch (err) {
+    const duration = Date.now() - startTime;
+    logger.error(`[MV_REFRESH] Failed after ${duration}ms:`, err);
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// Schedule materialized view refresh every 15 minutes
+cron.schedule(MV_REFRESH_SCHEDULE, async () => {
+  // Check if already refreshing
+  if (isRefreshingMaterializedViews) {
+    logger.warn("[MV_REFRESH] Skipping scheduled run - previous refresh still in progress");
+    return;
+  }
+  
+  // Acquire lock
+  isRefreshingMaterializedViews = true;
+  
+  try {
+    logger.info(`[MV_REFRESH] Running scheduled refresh (${MV_REFRESH_SCHEDULE})`);
+    await refreshMaterializedViews();
+  } catch (err) {
+    logger.error("[MV_REFRESH] Scheduled refresh failed:", err);
+  } finally {
+    // Release lock
+    isRefreshingMaterializedViews = false;
+  }
+});
+
 // Backfill is_new = 1 for earliest qualifying row per uid
 // async function backfillIsNew() {
 //   const client = await pool.connect();
@@ -1172,6 +1264,13 @@ async function startServer() {
     await processTelemetryLogs(`process_${Date.now()}`);
 
     await refreshLeaderboardAggregation();
+
+    // Refresh materialized views on startup (non-blocking)
+    logger.info('Running initial materialized views refresh on startup...');
+    refreshMaterializedViews().catch(err => {
+      logger.warn('Initial materialized views refresh failed (views may not exist yet):', err.message);
+    });
+
     return server;
   } catch (err) {
     logger.error("Failed to start server:", err);

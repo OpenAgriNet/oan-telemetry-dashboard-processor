@@ -622,7 +622,7 @@ async function ensureTablesExist() {
       CREATE TABLE IF NOT EXISTS public.sessions (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         session_id VARCHAR(64) UNIQUE NOT NULL,
-        user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+        user_id VARCHAR(255),
         channel VARCHAR(255),
         session_start_at BIGINT NOT NULL,
         session_end_at BIGINT,
@@ -631,6 +631,18 @@ async function ensureTablesExist() {
         server_duration_ms INTEGER,
         created_at TIMESTAMP DEFAULT NOW()
       )
+    `);
+    // Migration: Change user_id from UUID to VARCHAR for existing tables
+    await client.query(`
+      DO $$ 
+      BEGIN 
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns 
+          WHERE table_schema='public' AND table_name='sessions' AND column_name='user_id' AND data_type='uuid'
+        ) THEN
+          ALTER TABLE public.sessions ALTER COLUMN user_id TYPE VARCHAR(255);
+        END IF;
+      END $$;
     `);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_sessions_session_id ON sessions(session_id)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)`);
@@ -754,10 +766,10 @@ async function processUserData(client, event) {
  * Process session start (OE_START event)
  * @param {Object} client - Database client
  * @param {Object} event - Telemetry event
- * @param {string|null} userId - User UUID
+ * @param {string|null} uid - User UID (fingerprint-based or original)
  * @returns {string|null} - Session UUID or null
  */
-async function processSessionStart(client, event, userId) {
+async function processSessionStart(client, event, uid) {
   try {
     const sid = event.sid;
     if (!sid) {
@@ -774,10 +786,10 @@ async function processSessionStart(client, event, userId) {
       ON CONFLICT (session_id) DO UPDATE SET
         user_id = COALESCE(EXCLUDED.user_id, sessions.user_id)
       RETURNING id
-    `, [sid, userId, event.channel, sessionStartAt]);
+    `, [sid, uid, event.channel, sessionStartAt]);
 
     const sessionId = result.rows[0]?.id;
-    logger.debug(`Session started: sid=${sid}, id=${sessionId}`);
+    logger.debug(`Session started: sid=${sid}, id=${sessionId}, uid=${uid}`);
     return sessionId;
   } catch (err) {
     logger.error(`Error processing session start: ${err.message}`);
@@ -972,9 +984,11 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
           // V2: Process OE_START for user/session creation (device metadata stored in users)
           logger.info(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] Processing OE_START for V2 (user/session)`);
           try {
-            const userId = await processUserData(client, event);
-            await processSessionStart(client, event, userId);
-            logger.info(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] V2 OE_START processed: userId=${userId}`);
+            const fingerprint = event.edata?.eks?.fingerprint_details;
+            const uid = fingerprint?.device_id ? `fp_${fingerprint.device_id}` : event.uid;
+            await processUserData(client, event);
+            await processSessionStart(client, event, uid);
+            logger.info(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] V2 OE_START processed: uid=${uid}`);
           } catch (v2Err) {
             logger.error(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] V2 OE_START error: ${v2Err.message}`);
           }
@@ -983,8 +997,9 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
           logger.info(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] Processing OE_END for V2 (session end)`);
           try {
             await processSessionEnd(client, event);
-            // Update user's last_seen_at with fingerprint info
-            const uid = event.uid;
+            // Update user's last_seen_at with fingerprint-based uid
+            const fingerprint = event.edata?.eks?.fingerprint_details;
+            const uid = fingerprint?.device_id ? `fp_${fingerprint.device_id}` : event.uid;
             if (uid && uid !== 'guest') {
               await client.query(`
                 UPDATE users SET last_seen_at = NOW() WHERE uid = $1

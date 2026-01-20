@@ -98,9 +98,8 @@ async function ensureVillagesSeeded() {
           logger.info("Seeder completed successfully.");
           resolve();
         } else {
-          const msg = `Seeder exited with code ${code}${
-            signal ? " signal " + signal : ""
-          }`;
+          const msg = `Seeder exited with code ${code}${signal ? " signal " + signal : ""
+            }`;
           logger.error(msg);
           reject(new Error(msg));
         }
@@ -130,7 +129,7 @@ const BATCH_SIZE = process.env.BATCH_SIZE || 10;
 const CRON_SCHEDULE = process.env.CRON_SCHEDULE || "*/5 * * * *";
 const LEADERBOARD_REFRESH_SCHEDULE =
   process.env.LEADERBOARD_REFRESH_SCHEDULE || "0 1 * * *"; // Run at 1 AM every day
-const IS_NEW_BACKFILL_SCHEDULE = process.env.IS_NEW_BACKFILL_SCHEDULE || "*/30 * * * *" ; // Run every 30 minutes
+const IS_NEW_BACKFILL_SCHEDULE = process.env.IS_NEW_BACKFILL_SCHEDULE || "*/30 * * * *"; // Run every 30 minutes
 const MV_REFRESH_SCHEDULE = process.env.MV_REFRESH_SCHEDULE || "*/15 * * * *"; // Refresh materialized views every 15 minutes
 
 // Ensure necessary tables exist
@@ -538,31 +537,308 @@ async function ensureTablesExist() {
       WHERE table_name = 'feedback';
     `);
 
-    /*
-        await client.query(`
-          INSERT INTO public.event_processors (event_type, table_name, field_mappings)
-          VALUES 
-            ('Feedback', 'feedback', '{
-              "uid": "uid",
-              "sid": "sid",
-              "groupDetails": "edata.eks.groupDetails",
-              "channel": "channel",
-              "ets": "ets",
-              "feedbackText": "edata.eks.feedbackText",
-              "sessionId": "edata.eks.sessionId",
-              "questionText": "edata.eks.questionText",
-              "answerText": "edata.eks.answerText",
-              "feedbackType": "edata.eks.feedbackType"
-            }')
-          ON CONFLICT (event_type) DO NOTHING;
-        `);
-    */
-    logger.info("Database tables verified and created if needed");
+
+    // ============================================
+    // V2 SCHEMA: Users and Sessions Tables (Simplified - no devices table)
+    // ============================================
+
+    // Create users table for V2 (includes device metadata)
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.users (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        uid VARCHAR(255) UNIQUE NOT NULL,
+        -- User profile
+        mobile VARCHAR(20),
+        username VARCHAR(255),
+        email VARCHAR(255),
+        role VARCHAR(50),
+        farmer_id VARCHAR(100),
+        registered_location JSONB,
+        device_location JSONB,
+        agristack_location JSONB,
+        -- Device metadata (Fingerprint.js)
+        fingerprint_id VARCHAR(64),
+        browser_code VARCHAR(10),
+        browser_name VARCHAR(50),
+        browser_version VARCHAR(20),
+        device_code VARCHAR(10),
+        device_name VARCHAR(50),
+        device_model VARCHAR(100),
+        os_code VARCHAR(10),
+        os_name VARCHAR(50),
+        os_version VARCHAR(20),
+        -- Timestamps
+        first_seen_at TIMESTAMP,
+        last_seen_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    // Add device columns if they don't exist (for existing deployments)
+    await client.query(`
+      DO $$ 
+      BEGIN 
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name='fingerprint_id') THEN
+          ALTER TABLE public.users ADD COLUMN fingerprint_id VARCHAR(64);
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name='browser_code') THEN
+          ALTER TABLE public.users ADD COLUMN browser_code VARCHAR(10);
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name='browser_name') THEN
+          ALTER TABLE public.users ADD COLUMN browser_name VARCHAR(50);
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name='browser_version') THEN
+          ALTER TABLE public.users ADD COLUMN browser_version VARCHAR(20);
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name='device_code') THEN
+          ALTER TABLE public.users ADD COLUMN device_code VARCHAR(10);
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name='device_name') THEN
+          ALTER TABLE public.users ADD COLUMN device_name VARCHAR(50);
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name='device_model') THEN
+          ALTER TABLE public.users ADD COLUMN device_model VARCHAR(100);
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name='os_code') THEN
+          ALTER TABLE public.users ADD COLUMN os_code VARCHAR(10);
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name='os_name') THEN
+          ALTER TABLE public.users ADD COLUMN os_name VARCHAR(50);
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name='os_version') THEN
+          ALTER TABLE public.users ADD COLUMN os_version VARCHAR(20);
+        END IF;
+      END $$;
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_users_uid ON users(uid)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_users_mobile ON users(mobile)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_users_last_seen ON users(last_seen_at)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_users_fingerprint ON users(fingerprint_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_users_browser ON users(browser_code)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_users_device_type ON users(device_code)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_users_os ON users(os_code)`);
+
+    // Create sessions table for V2 (no device_id - device info stored in users)
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.sessions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        session_id VARCHAR(64) UNIQUE NOT NULL,
+        user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+        channel VARCHAR(255),
+        session_start_at BIGINT NOT NULL,
+        session_end_at BIGINT,
+        duration_seconds INTEGER,
+        render_duration_ms INTEGER,
+        server_duration_ms INTEGER,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_sessions_session_id ON sessions(session_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_sessions_start ON sessions(session_start_at)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_sessions_channel ON sessions(channel)`);
+
+    // Add session_id to existing tables for V2 linking
+    await client.query(`
+      ALTER TABLE questions ADD COLUMN IF NOT EXISTS session_id UUID REFERENCES sessions(id)
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_questions_session ON questions(session_id)`);
+
+    await client.query(`
+      ALTER TABLE feedback ADD COLUMN IF NOT EXISTS session_id UUID REFERENCES sessions(id)
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_feedback_session ON feedback(session_id)`);
+
+    await client.query(`
+      ALTER TABLE errorDetails ADD COLUMN IF NOT EXISTS session_id UUID REFERENCES sessions(id)
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_errordetails_session ON errorDetails(session_id)`);
+
+    logger.info("Database tables verified and created if needed (including V2 schema)");
   } catch (err) {
     logger.error("Error ensuring tables exist:", err);
     throw err;
   } finally {
     client.release();
+  }
+}
+
+// ============================================
+// V2 PROCESSING FUNCTIONS
+// ============================================
+
+/**
+ * Process and UPSERT user data from telemetry event (includes device metadata)
+ * @param {Object} client - Database client
+ * @param {Object} event - Telemetry event
+ * @returns {string|null} - User UUID or null
+ */
+async function processUserData(client, event) {
+  try {
+    const uid = event.uid;
+    if (!uid || uid === 'guest') {
+      logger.debug(`Skipping user upsert for uid: ${uid}`);
+      return null;
+    }
+
+    const target = event.edata?.eks?.target || {};
+    const fingerprint = event.edata?.eks?.fingerprint_details;
+
+    const result = await client.query(`
+      INSERT INTO users (uid, mobile, username, email, role, farmer_id, 
+                         registered_location, device_location, agristack_location,
+                         fingerprint_id, browser_code, browser_name, browser_version,
+                         device_code, device_name, device_model,
+                         os_code, os_name, os_version,
+                         first_seen_at, last_seen_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, NOW(), NOW())
+      ON CONFLICT (uid) DO UPDATE SET
+        mobile = COALESCE(EXCLUDED.mobile, users.mobile),
+        username = COALESCE(EXCLUDED.username, users.username),
+        email = COALESCE(EXCLUDED.email, users.email),
+        role = COALESCE(EXCLUDED.role, users.role),
+        farmer_id = COALESCE(EXCLUDED.farmer_id, users.farmer_id),
+        registered_location = COALESCE(EXCLUDED.registered_location, users.registered_location),
+        device_location = COALESCE(EXCLUDED.device_location, users.device_location),
+        agristack_location = COALESCE(EXCLUDED.agristack_location, users.agristack_location),
+        fingerprint_id = COALESCE(EXCLUDED.fingerprint_id, users.fingerprint_id),
+        browser_code = COALESCE(EXCLUDED.browser_code, users.browser_code),
+        browser_name = COALESCE(EXCLUDED.browser_name, users.browser_name),
+        browser_version = COALESCE(EXCLUDED.browser_version, users.browser_version),
+        device_code = COALESCE(EXCLUDED.device_code, users.device_code),
+        device_name = COALESCE(EXCLUDED.device_name, users.device_name),
+        device_model = COALESCE(EXCLUDED.device_model, users.device_model),
+        os_code = COALESCE(EXCLUDED.os_code, users.os_code),
+        os_name = COALESCE(EXCLUDED.os_name, users.os_name),
+        os_version = COALESCE(EXCLUDED.os_version, users.os_version),
+        last_seen_at = NOW()
+      RETURNING id
+    `, [
+      uid,
+      target.mobile || null,
+      target.username || null,
+      target.email || null,
+      target.role || null,
+      target.farmer_id || null,
+      target.registered_location || null,
+      target.device_location || null,
+      target.agristack_location || null,
+      fingerprint?.device_id || null,
+      fingerprint?.browser?.code || null,
+      fingerprint?.browser?.name || null,
+      fingerprint?.browser?.version || null,
+      fingerprint?.device?.code || null,
+      fingerprint?.device?.name || null,
+      fingerprint?.device?.model || null,
+      fingerprint?.os?.code || null,
+      fingerprint?.os?.name || null,
+      fingerprint?.os?.version || null
+    ]);
+
+    const userId = result.rows[0]?.id;
+    logger.debug(`User upserted: uid=${uid}, id=${userId}, fingerprint=${fingerprint?.device_id || 'none'}`);
+    return userId;
+  } catch (err) {
+    logger.error(`Error processing user data: ${err.message}`);
+    return null;
+  }
+}
+
+// NOTE: processDeviceData removed - device metadata now stored in users table via processUserData
+
+/**
+ * Process session start (OE_START event)
+ * @param {Object} client - Database client
+ * @param {Object} event - Telemetry event
+ * @param {string|null} userId - User UUID
+ * @returns {string|null} - Session UUID or null
+ */
+async function processSessionStart(client, event, userId) {
+  try {
+    const sid = event.sid;
+    if (!sid) {
+      logger.debug('No session_id (sid) found, skipping session insert');
+      return null;
+    }
+
+    const fingerprint = event.edata?.eks?.fingerprint_details;
+    const sessionStartAt = fingerprint?.session?.session_start_at || event.ets;
+
+    const result = await client.query(`
+      INSERT INTO sessions (session_id, user_id, channel, session_start_at)
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT (session_id) DO UPDATE SET
+        user_id = COALESCE(EXCLUDED.user_id, sessions.user_id)
+      RETURNING id
+    `, [sid, userId, event.channel, sessionStartAt]);
+
+    const sessionId = result.rows[0]?.id;
+    logger.debug(`Session started: sid=${sid}, id=${sessionId}`);
+    return sessionId;
+  } catch (err) {
+    logger.error(`Error processing session start: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Process session end (OE_END event) - update with end time, duration, performance
+ * @param {Object} client - Database client
+ * @param {Object} event - Telemetry event
+ */
+async function processSessionEnd(client, event) {
+  try {
+    const sid = event.sid;
+    if (!sid) {
+      logger.debug('No session_id (sid) found, skipping session end update');
+      return;
+    }
+
+    const fingerprint = event.edata?.eks?.fingerprint_details;
+    const sessionEndAt = fingerprint?.session?.session_end_at || event.ets;
+    const sessionStartAt = fingerprint?.session?.session_start_at;
+
+    // Calculate duration in seconds
+    let durationSeconds = null;
+    if (sessionStartAt && sessionEndAt) {
+      durationSeconds = Math.floor((sessionEndAt - sessionStartAt) / 1000);
+    }
+
+    // Performance metrics
+    const renderDurationMs = fingerprint?.performance?.render_duration_ms || null;
+    const serverDurationMs = fingerprint?.performance?.server_duration_ms || null;
+
+    await client.query(`
+      UPDATE sessions SET
+        session_end_at = $1,
+        duration_seconds = $2,
+        render_duration_ms = $3,
+        server_duration_ms = $4
+      WHERE session_id = $5
+    `, [sessionEndAt, durationSeconds, renderDurationMs, serverDurationMs, sid]);
+
+    logger.debug(`Session ended: sid=${sid}, duration=${durationSeconds}s`);
+  } catch (err) {
+    logger.error(`Error processing session end: ${err.message}`);
+  }
+}
+
+/**
+ * Get session UUID by session_id (sid)
+ * @param {Object} client - Database client
+ * @param {string} sid - Session ID from telemetry
+ * @returns {string|null} - Session UUID or null
+ */
+async function getSessionIdBySid(client, sid) {
+  try {
+    if (!sid) return null;
+    const result = await client.query(
+      'SELECT id FROM sessions WHERE session_id = $1',
+      [sid]
+    );
+    return result.rows[0]?.id || null;
+  } catch (err) {
+    logger.error(`Error getting session id: ${err.message}`);
+    return null;
   }
 }
 
@@ -589,11 +865,11 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
   logger.info(`[${batchId}] Step 1: Acquiring database connection...`);
   const client = await pool.connect();
   logger.info(`[${batchId}] Step 1: Database connection acquired`);
-  
+
   let processedCount = 0;
   let totalEventsProcessed = 0;
   let deadLetterCount = 0;
-  
+
   try {
     // Begin transaction
     logger.info(`[${batchId}] Step 2: Beginning database transaction...`);
@@ -612,7 +888,7 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
     );
     const queryDuration = Date.now() - queryStartTime;
     logger.info(`[${batchId}] Step 3: Query completed in ${queryDuration}ms, found ${result.rows.length} logs`);
-    
+
     if (result.rows.length === 0) {
       logger.info(`[${batchId}] Step 4: No new telemetry logs to process - committing empty transaction`);
       await client.query("COMMIT");
@@ -627,7 +903,7 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
       const log = result.rows[logIndex];
       const logStartTime = Date.now();
       logger.info(`[${batchId}] [Log ${logIndex + 1}/${result.rows.length}] Processing log (timestamp: ${log.timestamp}, level: ${log.level})`);
-      
+
       const events = parseTelemetryMessage(log.message, batchId, logIndex + 1);
       logger.info(`[${batchId}] [Log ${logIndex + 1}] Parsed ${events.length} events from message`);
 
@@ -641,19 +917,19 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
         const eventUid = event.uid || 'unknown';
         const eventMid = event.mid || 'unknown';
         logger.debug(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}/${events.length}] Processing event type: ${eventType}, uid: ${eventUid}, mid: ${eventMid}`);
-        
+
         let eventProcessed = false;
         let matchedProcessor = null;
-        
+
         for (const key in eventProcessors) {
           const processor = eventProcessors[key];
           const verified = getNestedValue(
             event,
             processor["fieldVerification"]
           );
-          
+
           logger.debug(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] Checking processor '${key}': eventType match=${processor["eventType"] === eventType}, verified=${verified !== undefined}`);
-          
+
           if (
             processor["eventType"] === eventType &&
             verified !== undefined &&
@@ -661,18 +937,18 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
           ) {
             matchedProcessor = key;
             logger.info(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] mid: ${eventMid} - Matched processor '${key}' for event type '${eventType}'`);
-            
+
             const processorStartTime = Date.now();
             await processor["process"](client, event);
             const processorDuration = Date.now() - processorStartTime;
-            
+
             logger.info(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] mid: ${eventMid} - Processor '${key}' completed in ${processorDuration}ms`);
             eventProcessed = true;
             totalEventsProcessed++;
             break;
           }
         }
-        
+
         if (
           eventType !== "OE_END" &&
           eventType !== "OE_START" &&
@@ -687,18 +963,42 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
           );
           deadLetterCount++;
           logger.info(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] Event inserted into dead_letter_logs`);
-        } else if (eventType === "OE_END" || eventType === "OE_START") {
-          logger.debug(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] Skipping system event type: ${eventType}`);
+        } else if (eventType === "OE_START") {
+          // V2: Process OE_START for user/session creation (device metadata stored in users)
+          logger.info(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] Processing OE_START for V2 (user/session)`);
+          try {
+            const userId = await processUserData(client, event);
+            await processSessionStart(client, event, userId);
+            logger.info(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] V2 OE_START processed: userId=${userId}`);
+          } catch (v2Err) {
+            logger.error(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] V2 OE_START error: ${v2Err.message}`);
+          }
+        } else if (eventType === "OE_END") {
+          // V2: Process OE_END to update session with end time and performance
+          logger.info(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] Processing OE_END for V2 (session end)`);
+          try {
+            await processSessionEnd(client, event);
+            // Update user's last_seen_at with fingerprint info
+            const uid = event.uid;
+            if (uid && uid !== 'guest') {
+              await client.query(`
+                UPDATE users SET last_seen_at = NOW() WHERE uid = $1
+              `, [uid]);
+            }
+            logger.info(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] V2 OE_END processed`);
+          } catch (v2Err) {
+            logger.error(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] V2 OE_END error: ${v2Err.message}`);
+          }
         }
       }
-      
+
       // Update sync status for processed log
       logger.debug(`[${batchId}] [Log ${logIndex + 1}] Updating sync_status to 1 for processed log...`);
       await client.query(
         `UPDATE winston_logs SET sync_status = 1 WHERE id = $1`,
         [log.id]
       );
-      
+
       const logDuration = Date.now() - logStartTime;
       processedCount++;
       logger.info(`[${batchId}] [Log ${logIndex + 1}] Log processing completed in ${logDuration}ms, sync_status updated`);
@@ -708,13 +1008,13 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
     logger.info(`[${batchId}] Step 5: Committing transaction...`);
     await client.query("COMMIT");
     logger.info(`[${batchId}] Step 5: Transaction committed successfully`);
-    
+
     logger.info(`[${batchId}] ========== PROCESSING SUMMARY ==========`);
     logger.info(`[${batchId}] Logs processed: ${processedCount}`);
     logger.info(`[${batchId}] Total events processed: ${totalEventsProcessed}`);
     logger.info(`[${batchId}] Dead letter events: ${deadLetterCount}`);
     logger.info(`[${batchId}] ==========================================`);
-    
+
     return { processed: result.rows.length, status: "success", eventsProcessed: totalEventsProcessed, deadLetterCount };
   } catch (err) {
     logger.error(`[${batchId}] Step ERROR: Rolling back transaction due to error...`);
@@ -769,7 +1069,7 @@ async function processQuestionData(client, event) {
     // );
 
     await client.query(
-  `
+      `
  INSERT INTO questions (
   uid, sid, groupdetails, channel, ets,
   questiontext, questionsource, answertext, answer, is_new
@@ -781,18 +1081,18 @@ ON CONFLICT (uid)
 DO UPDATE
 SET is_new = 0;
   `,
-  [
-    uid,
-    sid,
-    JSON.stringify(groupDetails),
-    channel,
-    ets,
-    questionText,
-    questionSource,
-    JSON.stringify(answerText),
-    answer,
-  ]
-);
+      [
+        uid,
+        sid,
+        JSON.stringify(groupDetails),
+        channel,
+        ets,
+        questionText,
+        questionSource,
+        JSON.stringify(answerText),
+        answer,
+      ]
+    );
 
     logger.info(
       `Processed question data for uid: ${uid}, question: ${questionText?.substring(
@@ -862,17 +1162,17 @@ cron.schedule(CRON_SCHEDULE, async () => {
     logger.warn(`[CRON] Skipping scheduled run - previous batch [${currentBatchId}] still in progress`);
     return;
   }
-  
+
   const batchId = `batch_${Date.now()}`;
   const cronStartTime = Date.now();
-  
+
   // Acquire lock
   isProcessingLogs = true;
   currentBatchId = batchId;
-  
+
   logger.info(`[${batchId}] ========== CRON JOB STARTED ==========`);
   logger.info(`[${batchId}] Schedule: ${CRON_SCHEDULE}, Batch Size: ${BATCH_SIZE}`);
-  
+
   try {
     const result = await processTelemetryLogs(batchId);
     const duration = Date.now() - cronStartTime;
@@ -887,6 +1187,75 @@ cron.schedule(CRON_SCHEDULE, async () => {
     isProcessingLogs = false;
     currentBatchId = null;
     logger.info(`[${batchId}] Lock released`);
+  }
+});
+
+// ============================================
+// V2: Materialized Views Refresh Cron
+// Refresh analytics views every 15 minutes
+// ============================================
+const V2_MV_REFRESH_SCHEDULE = process.env.V2_MV_REFRESH_SCHEDULE || "*/15 * * * *";
+let isRefreshingV2Views = false;
+
+cron.schedule(V2_MV_REFRESH_SCHEDULE, async () => {
+  if (isRefreshingV2Views) {
+    logger.warn('[V2 MV] Skipping refresh - previous refresh still in progress');
+    return;
+  }
+
+  isRefreshingV2Views = true;
+  const refreshStartTime = Date.now();
+  logger.info(`[V2 MV] Starting materialized views refresh (${V2_MV_REFRESH_SCHEDULE})`);
+
+  const client = await pool.connect();
+  try {
+    // Check if views exist before refreshing
+    const viewsExist = await client.query(`
+      SELECT COUNT(*) as cnt FROM pg_matviews 
+      WHERE matviewname IN ('mv_total_devices', 'mv_browser_density', 'mv_device_density', 
+                            'mv_os_density', 'mv_session_duration', 'mv_active_users', 
+                            'mv_performance_metrics')
+    `);
+
+    if (parseInt(viewsExist.rows[0].cnt) === 0) {
+      logger.info('[V2 MV] No V2 materialized views found - skipping refresh');
+      return;
+    }
+
+    // Refresh each view
+    const views = [
+      'mv_total_devices',
+      'mv_browser_density',
+      'mv_device_density',
+      'mv_os_density',
+      'mv_session_duration',
+      'mv_active_users',
+      'mv_performance_metrics'
+    ];
+
+    for (const view of views) {
+      try {
+        await client.query(`REFRESH MATERIALIZED VIEW CONCURRENTLY ${view}`);
+        logger.debug(`[V2 MV] Refreshed ${view}`);
+      } catch (viewErr) {
+        if (viewErr.message.includes('does not exist')) {
+          logger.debug(`[V2 MV] View ${view} does not exist yet`);
+        } else if (viewErr.message.includes('cannot refresh')) {
+          await client.query(`REFRESH MATERIALIZED VIEW ${view}`);
+          logger.debug(`[V2 MV] Refreshed ${view} (non-concurrent)`);
+        } else {
+          logger.warn(`[V2 MV] Failed to refresh ${view}: ${viewErr.message}`);
+        }
+      }
+    }
+
+    const duration = Date.now() - refreshStartTime;
+    logger.info(`[V2 MV] Materialized views refresh completed in ${duration}ms`);
+  } catch (err) {
+    logger.error(`[V2 MV] Refresh failed: ${err.message}`);
+  } finally {
+    client.release();
+    isRefreshingV2Views = false;
   }
 });
 
@@ -1121,24 +1490,24 @@ let isRefreshingMaterializedViews = false;
 async function refreshMaterializedViews() {
   const client = await pool.connect();
   const startTime = Date.now();
-  
+
   try {
     logger.info("[MV_REFRESH] Starting materialized views refresh...");
-    
+
     // Check if materialized views exist before attempting refresh
     const viewCheck = await client.query(`
       SELECT matviewname FROM pg_matviews 
       WHERE schemaname = 'public' 
       AND matviewname IN ('mv_user_first_activity', 'mv_daily_new_returning_users')
     `);
-    
+
     const existingViews = viewCheck.rows.map(r => r.matviewname);
-    
+
     if (existingViews.length === 0) {
       logger.warn("[MV_REFRESH] No materialized views found. Please run the CREATE MATERIALIZED VIEW statements first.");
       return { status: "skipped", reason: "views_not_found" };
     }
-    
+
     // Refresh mv_user_first_activity first (foundation view)
     if (existingViews.includes('mv_user_first_activity')) {
       logger.info("[MV_REFRESH] Refreshing mv_user_first_activity...");
@@ -1146,7 +1515,7 @@ async function refreshMaterializedViews() {
       await client.query("REFRESH MATERIALIZED VIEW CONCURRENTLY mv_user_first_activity");
       logger.info(`[MV_REFRESH] mv_user_first_activity refreshed in ${Date.now() - mv1Start}ms`);
     }
-    
+
     // Refresh mv_daily_new_returning_users (depends on first view)
     if (existingViews.includes('mv_daily_new_returning_users')) {
       logger.info("[MV_REFRESH] Refreshing mv_daily_new_returning_users...");
@@ -1154,16 +1523,16 @@ async function refreshMaterializedViews() {
       await client.query("REFRESH MATERIALIZED VIEW CONCURRENTLY mv_daily_new_returning_users");
       logger.info(`[MV_REFRESH] mv_daily_new_returning_users refreshed in ${Date.now() - mv2Start}ms`);
     }
-    
+
     const totalDuration = Date.now() - startTime;
     logger.info(`[MV_REFRESH] All materialized views refreshed successfully in ${totalDuration}ms`);
-    
-    return { 
-      status: "success", 
+
+    return {
+      status: "success",
       duration: totalDuration,
-      refreshedViews: existingViews 
+      refreshedViews: existingViews
     };
-    
+
   } catch (err) {
     const duration = Date.now() - startTime;
     logger.error(`[MV_REFRESH] Failed after ${duration}ms:`, err);
@@ -1180,10 +1549,10 @@ cron.schedule(MV_REFRESH_SCHEDULE, async () => {
     logger.warn("[MV_REFRESH] Skipping scheduled run - previous refresh still in progress");
     return;
   }
-  
+
   // Acquire lock
   isRefreshingMaterializedViews = true;
-  
+
   try {
     logger.info(`[MV_REFRESH] Running scheduled refresh (${MV_REFRESH_SCHEDULE})`);
     await refreshMaterializedViews();

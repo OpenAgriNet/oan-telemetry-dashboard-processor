@@ -674,14 +674,19 @@ async function ensureTablesExist() {
  */
 async function processUserData(client, event) {
   try {
-    const uid = event.uid;
+    const target = event.edata?.eks?.target || {};
+    const fingerprint = event.edata?.eks?.fingerprint_details;
+
+    // Use fingerprint device_id as uid if available, otherwise fallback to event.uid
+    let uid = fingerprint?.device_id ? `fp_${fingerprint.device_id}` : event.uid;
+
     if (!uid || uid === 'guest') {
-      logger.debug(`Skipping user upsert for uid: ${uid}`);
+      logger.debug(`Skipping user upsert - no fingerprint and uid is guest/empty`);
       return null;
     }
 
-    const target = event.edata?.eks?.target || {};
-    const fingerprint = event.edata?.eks?.fingerprint_details;
+    // Debug logging to trace data extraction
+    logger.debug(`processUserData: uid=${uid}, fingerprint_id=${fingerprint?.device_id || 'null'}, browser=${fingerprint?.browser?.name || 'null'}, device=${fingerprint?.device?.name || 'null'}, os=${fingerprint?.os?.name || 'null'}`);
 
     const result = await client.query(`
       INSERT INTO users (uid, mobile, username, email, role, farmer_id, 

@@ -1,0 +1,82 @@
+version: '3.8'
+
+services:
+  # Production Service
+  telemetry-processor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: telemetry-processor:latest
+    container_name: telemetry-processor
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - DB_HOST=postgres
+    ports:
+      - "3000:3000"
+    depends_on:
+      - postgres
+    networks:
+      - telemetry-network
+
+  # Development Service (with hot reloading)
+  telemetry-processor-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: telemetry-processor:dev
+    container_name: telemetry-processor-dev
+    restart: unless-stopped
+    env_file:
+      - .env.dev
+    environment:
+      - NODE_ENV=development
+      - DB_HOST=postgres
+    ports:
+      - "3001:3000"
+    volumes:
+      - .:/usr/src/app
+      - /usr/src/app/node_modules
+    depends_on:
+      - postgres
+      - adminer
+    networks:
+      - telemetry-network
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: telemetry-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=telemetry
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      #- ./backup.sql:/docker-entrypoint-initdb.d/backup.sql
+    networks:
+      - telemetry-network
+
+  # Adminer (Database Management UI)
+  adminer:
+    image: adminer
+    container_name: telemetry-adminer
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+    networks:
+      - telemetry-network
+
+networks:
+  telemetry-network:
+    driver: bridge
+
+volumes:
+  postgres-data:

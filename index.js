@@ -22,6 +22,22 @@ const {
 } = require("./eventProcessors");
 const { forEach } = require("lodash");
 
+let isShuttingDown = false;
+let server; // HTTP server reference
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
+process.on('uncaughtException', (err) => {
+  logger.error('[FATAL] Uncaught Exception', err);
+  shutdown('uncaughtException');
+});
+
+process.on('unhandledRejection', (reason) => {
+  logger.error('[FATAL] Unhandled Promise Rejection', reason);
+  shutdown('unhandledRejection');
+});
+
 // Load environment variables from .env file
 dotenv.config();
 
@@ -909,6 +925,10 @@ let currentBatchId = null;
 
 // Schedule telemetry processing with configurable cron schedule
 cron.schedule(CRON_SCHEDULE, async () => {
+  if (isShuttingDown) {
+    logger.warn('[CRON] Skipping run — application shutting down');
+    return;
+  }
   // Check if already processing
   if (isProcessingLogs) {
     logger.warn(
@@ -1030,6 +1050,9 @@ app.post("/api/event-processors", async (req, res) => {
 
 // Health check endpoint
 app.get("/health", (req, res) => {
+  if (isShuttingDown) {
+    return res.status(503).send('Shutting down');
+  }
   res.status(200).json({
     status: "UP",
     version: process.env.npm_package_version || "1.0.0",
@@ -1248,6 +1271,10 @@ async function refreshMaterializedViews() {
 
 // Schedule materialized view refresh every 15 minutes
 cron.schedule(MV_REFRESH_SCHEDULE, async () => {
+  if (isShuttingDown) {
+    logger.warn('[MV_REFRESH] Skipping run — application shutting down');
+    return;
+  }
   // Check if already refreshing
   if (isRefreshingMaterializedViews) {
     logger.warn(
@@ -1332,7 +1359,7 @@ async function startServer() {
     await loadEventProcessors.loadFromDatabase(pool);
 
     // Start Express server
-    const server = app.listen(PORT, () => {
+    server = app.listen(PORT, () => {
       logger.info(`Telemetry log processor service started on port ${PORT}`);
     });
 
@@ -1358,12 +1385,37 @@ async function startServer() {
   }
 }
 
-// Handle shutdown gracefully
-process.on("SIGTERM", () => {
-  logger.info("SIGTERM received, shutting down gracefully");
-  pool.end();
-  process.exit(0);
-});
+async function shutdown(reason) {
+  if (isShuttingDown) return; // avoid double shutdown
+  isShuttingDown = true;
+
+  console.log(`[SHUTDOWN] Initiated due to: ${reason || 'manual stop'}`);
+
+  try {
+    // Close server if running
+    if (server) {
+      console.log('[SHUTDOWN] Closing HTTP server...');
+      await new Promise((resolve) => server.close(resolve));
+      console.log('[SHUTDOWN] HTTP server closed');
+    }
+
+    // Close DB pool
+    console.log('[SHUTDOWN] Closing DB pool...');
+    await pool.end();
+    console.log('[SHUTDOWN] DB pool closed');
+  } catch (err) {
+    console.error('[SHUTDOWN] Error during cleanup:', err);
+  }
+
+  // Decide exit code
+  // 0 -> manual stop (docker won't restart)
+  // 1 -> crash/error (docker restarts)
+  const exitCode =
+    reason === 'SIGINT' || reason === 'SIGTERM' ? 0 : 1;
+
+  console.log(`[SHUTDOWN] Exiting with code ${exitCode}`);
+  process.exit(exitCode);
+}
 
 // Export for testing
 module.exports = {

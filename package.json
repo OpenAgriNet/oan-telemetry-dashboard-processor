@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "NodeJS microservice to process telemetry logs from PostgreSQL database",
   "main": "index.js",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",

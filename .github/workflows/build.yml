@@ -5,13 +5,17 @@ on:
     branches:
       - bh-main
       - bh-dev
+      - mh-main
+      - mh-dev
   pull_request:
     branches:
       - bh-main
       - bh-dev
+      - mh-main
+      - mh-dev
 
 env:
-  IMAGE_NAME: oan-telemetry-processor
+  BASE_IMAGE_NAME: oan-telemetry-processor
 
 jobs:
   build:
@@ -51,12 +55,16 @@ jobs:
         id: package-version
         run: echo "VERSION=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
 
-      - name: Set image tags based on branch
+      - name: Set image name and tags based on branch
         id: set-tags
         run: |
           BRANCH="${{ github.ref_name }}"
-          echo "BRANCH_TAG=${BRANCH}" >> $GITHUB_OUTPUT
-          echo "LATEST_TAG=${BRANCH}-latest" >> $GITHUB_OUTPUT
+          ENV_PREFIX=$(echo "$BRANCH" | cut -d'-' -f1)
+          BUILD_TYPE=$(echo "$BRANCH" | cut -d'-' -f2)
+          
+          echo "IMAGE_NAME=${ENV_PREFIX}-${{ env.BASE_IMAGE_NAME }}" >> $GITHUB_OUTPUT
+          echo "BUILD_TAG=${BUILD_TYPE}" >> $GITHUB_OUTPUT
+          echo "LATEST_TAG=${BUILD_TYPE}-latest" >> $GITHUB_OUTPUT
 
       - name: Authenticate to Google Cloud
         id: auth
@@ -79,10 +87,10 @@ jobs:
           context: .
           push: true
           tags: |
-            ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_ARTIFACT_REPO }}/${{ env.IMAGE_NAME }}:${{ steps.set-tags.outputs.LATEST_TAG }}
-            ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_ARTIFACT_REPO }}/${{ env.IMAGE_NAME }}:${{ steps.package-version.outputs.VERSION }}-${{ steps.set-tags.outputs.BRANCH_TAG }}
-            ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_ARTIFACT_REPO }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-            ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_ARTIFACT_REPO }}/${{ env.IMAGE_NAME }}:${{ steps.set-tags.outputs.BRANCH_TAG }}
+            ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_ARTIFACT_REPO }}/${{ steps.set-tags.outputs.IMAGE_NAME }}:${{ steps.set-tags.outputs.LATEST_TAG }}
+            ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_ARTIFACT_REPO }}/${{ steps.set-tags.outputs.IMAGE_NAME }}:${{ steps.package-version.outputs.VERSION }}-${{ steps.set-tags.outputs.BUILD_TAG }}
+            ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_ARTIFACT_REPO }}/${{ steps.set-tags.outputs.IMAGE_NAME }}:${{ github.sha }}
+            ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_ARTIFACT_REPO }}/${{ steps.set-tags.outputs.IMAGE_NAME }}:${{ steps.set-tags.outputs.BUILD_TAG }}
           platforms: linux/amd64
           cache-from: type=gha
           cache-to: type=gha,mode=max

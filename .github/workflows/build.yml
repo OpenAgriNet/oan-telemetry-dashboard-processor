@@ -51,16 +51,12 @@ jobs:
         id: package-version
         run: echo "VERSION=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
 
-      - name: Set environment tag based on branch
-        id: set-env-tag
+      - name: Set image tags based on branch
+        id: set-tags
         run: |
-          if [[ "${{ github.ref_name }}" == "bh-main" ]]; then
-            echo "ENV_TAG=prod" >> $GITHUB_OUTPUT
-          elif [[ "${{ github.ref_name }}" == "bh-dev" ]]; then
-            echo "ENV_TAG=dev" >> $GITHUB_OUTPUT
-          else
-            echo "ENV_TAG=dev" >> $GITHUB_OUTPUT
-          fi
+          BRANCH="${{ github.ref_name }}"
+          echo "BRANCH_TAG=${BRANCH}" >> $GITHUB_OUTPUT
+          echo "LATEST_TAG=${BRANCH}-latest" >> $GITHUB_OUTPUT
 
       - name: Authenticate to Google Cloud
         id: auth
@@ -83,10 +79,10 @@ jobs:
           context: .
           push: true
           tags: |
-            ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_ARTIFACT_REPO }}/${{ env.IMAGE_NAME }}:latest
-            ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_ARTIFACT_REPO }}/${{ env.IMAGE_NAME }}:${{ steps.package-version.outputs.VERSION }}
+            ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_ARTIFACT_REPO }}/${{ env.IMAGE_NAME }}:${{ steps.set-tags.outputs.LATEST_TAG }}
+            ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_ARTIFACT_REPO }}/${{ env.IMAGE_NAME }}:${{ steps.package-version.outputs.VERSION }}-${{ steps.set-tags.outputs.BRANCH_TAG }}
             ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_ARTIFACT_REPO }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-            ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_ARTIFACT_REPO }}/${{ env.IMAGE_NAME }}:${{ steps.set-env-tag.outputs.ENV_TAG }}
+            ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_ARTIFACT_REPO }}/${{ env.IMAGE_NAME }}:${{ steps.set-tags.outputs.BRANCH_TAG }}
           platforms: linux/amd64
           cache-from: type=gha
           cache-to: type=gha,mode=max

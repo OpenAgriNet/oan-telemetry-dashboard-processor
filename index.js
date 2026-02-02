@@ -22,6 +22,22 @@ const {
 } = require("./eventProcessors");
 const { forEach } = require("lodash");
 
+let isShuttingDown = false;
+let server; // HTTP server reference
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
+process.on('uncaughtException', (err) => {
+  logger.error('[FATAL] Uncaught Exception', err);
+  shutdown('uncaughtException');
+});
+
+process.on('unhandledRejection', (reason) => {
+  logger.error('[FATAL] Unhandled Promise Rejection', reason);
+  shutdown('unhandledRejection');
+});
+
 // Load environment variables from .env file
 dotenv.config();
 
@@ -100,7 +116,7 @@ async function ensureVillagesSeeded() {
         } else {
           const msg = `Seeder exited with code ${code}${
             signal ? " signal " + signal : ""
-          }`;
+            }`;
           logger.error(msg);
           reject(new Error(msg));
         }
@@ -133,6 +149,8 @@ const LEADERBOARD_REFRESH_SCHEDULE =
 const IS_NEW_BACKFILL_SCHEDULE =
   process.env.IS_NEW_BACKFILL_SCHEDULE || "*/30 * * * *"; // Run every 30 minutes
 const MV_REFRESH_SCHEDULE = process.env.MV_REFRESH_SCHEDULE || "*/15 * * * *"; // Refresh materialized views every 15 minutes
+const ARCHIVE_CRON_SCHEDULE =
+  process.env.ARCHIVE_CRON_SCHEDULE || '0 2 * * *'; // 2 AM daily
 
 // Ensure necessary tables exist
 async function ensureTablesExist() {
@@ -192,6 +210,45 @@ async function ensureTablesExist() {
         last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (unique_id)
       )
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.archived_winston_logs (
+        id UUID PRIMARY KEY,
+        level VARCHAR,
+        message VARCHAR,
+        meta JSONB,
+        timestamp TIMESTAMP,
+        sync_status INTEGER DEFAULT 1,
+        archived_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    await client.query(`
+      DO $$ 
+      BEGIN 
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='archived_winston_logs' AND column_name='id') THEN
+          ALTER TABLE public.archived_winston_logs ADD COLUMN id UUID PRIMARY KEY;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='archived_winston_logs' AND column_name='level') THEN
+          ALTER TABLE public.archived_winston_logs ADD COLUMN level VARCHAR;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='archived_winston_logs' AND column_name='message') THEN
+          ALTER TABLE public.archived_winston_logs ADD COLUMN message VARCHAR;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='archived_winston_logs' AND column_name='meta') THEN
+          ALTER TABLE public.archived_winston_logs ADD COLUMN meta JSONB;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='archived_winston_logs' AND column_name='timestamp') THEN
+          ALTER TABLE public.archived_winston_logs ADD COLUMN timestamp TIMESTAMP;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='archived_winston_logs' AND column_name='sync_status') THEN
+          ALTER TABLE public.archived_winston_logs ADD COLUMN sync_status INTEGER DEFAULT 1;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='archived_winston_logs' AND column_name='archived_at') THEN
+          ALTER TABLE public.archived_winston_logs ADD COLUMN archived_at TIMESTAMP DEFAULT NOW();
+        END IF;
+      END $$;
     `);
 
     await client.query(`
@@ -909,6 +966,10 @@ let currentBatchId = null;
 
 // Schedule telemetry processing with configurable cron schedule
 cron.schedule(CRON_SCHEDULE, async () => {
+  if (isShuttingDown) {
+    logger.warn('[CRON] Skipping run — application shutting down');
+    return;
+  }
   // Check if already processing
   if (isProcessingLogs) {
     logger.warn(
@@ -1030,6 +1091,9 @@ app.post("/api/event-processors", async (req, res) => {
 
 // Health check endpoint
 app.get("/health", (req, res) => {
+  if (isShuttingDown) {
+    return res.status(503).send('Shutting down');
+  }
   res.status(200).json({
     status: "UP",
     version: process.env.npm_package_version || "1.0.0",
@@ -1166,6 +1230,142 @@ app.post("/api/refresh-leaderboard", async (req, res) => {
   }
 });
 
+// ARCHIVE OLD LOGS
+
+/**
+ * Archive processed winston logs older than N days
+ * - Moves rows to archived_winston_logs
+ * - Deletes them from winston_logs
+ * - Runs in batches for safety
+ */
+async function archiveOldWinstonLogs({
+  retentionDays = 60,
+  batchSize = 10000,
+  dryRun = false, // VERY useful for local testing
+} = {}) {
+  const client = await pool.connect();
+  let totalArchived = 0;
+
+  try {
+    logger.info(
+      `[ARCHIVE] Starting archival: retention=${retentionDays} days, batchSize=${batchSize}, dryRun=${dryRun}`,
+    );
+
+    while (true) {
+      if (isShuttingDown) {
+        logger.warn('[ARCHIVE] Shutdown during batch — rolling back');
+        await client.query('ROLLBACK');
+        break;
+      }
+      await client.query("BEGIN");
+
+      /**
+       * Step 1: Insert into archive table
+       * RETURNING id lets us delete exactly what we inserted
+       */
+      const insertQuery = `
+        WITH to_archive AS (
+          SELECT id, level, message, meta, "timestamp", sync_status
+          FROM public.winston_logs
+          WHERE sync_status = 1
+            AND "timestamp" < NOW() - INTERVAL '${retentionDays} days'
+          ORDER BY "timestamp"
+          LIMIT $1
+          FOR UPDATE SKIP LOCKED
+        )
+        INSERT INTO public.archived_winston_logs (
+          id, level, message, meta, "timestamp", sync_status
+        )
+        SELECT id, level, message, meta, "timestamp", sync_status
+        FROM to_archive
+        RETURNING id;
+      `;
+
+      const { rows } = await client.query(insertQuery, [batchSize]);
+
+      if (rows.length === 0) {
+        await client.query("ROLLBACK");
+        logger.info("[ARCHIVE] No more rows to archive. Done.");
+        break;
+      }
+
+      const ids = rows.map((r) => r.id);
+
+      logger.info(`[ARCHIVE] Prepared ${ids.length} rows for archival`);
+
+      /**
+       * Step 2: Delete from source table
+       */
+      if (!dryRun) {
+        await client.query(
+          `DELETE FROM public.winston_logs WHERE id = ANY($1::uuid[])`,
+          [ids],
+        );
+      }
+
+      await client.query(dryRun ? "ROLLBACK" : "COMMIT");
+
+      totalArchived += ids.length;
+
+      logger.info(
+        `[ARCHIVE] Batch completed. Archived so far: ${totalArchived}`,
+      );
+
+      // Safety brake for local testing
+      if (dryRun) break;
+    }
+
+    logger.info(
+      `[ARCHIVE] Completed successfully. Total archived: ${totalArchived}`,
+    );
+
+    return { status: "success", archived: totalArchived };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    logger.error("[ARCHIVE] Failed. Transaction rolled back.", err);
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+cron.schedule(ARCHIVE_CRON_SCHEDULE, async () => {
+  if (isShuttingDown) {
+    logger.warn('[ARCHIVE_CRON] Skipping run — application shutting down');
+    return;
+  }
+
+  logger.info(
+    `[ARCHIVE_CRON] Running scheduled archive job (${ARCHIVE_CRON_SCHEDULE})`
+  );
+
+  try {
+    await archiveOldWinstonLogs({
+      retentionDays: 60,
+      batchSize: 10000,
+      dryRun: false, // ⚠️ keep false in prod
+    });
+    logger.info('[ARCHIVE_CRON] Archive job completed successfully');
+  } catch (err) {
+    logger.error('[ARCHIVE_CRON] Archive job failed:', err);
+  }
+});
+
+app.post("/api/archive-log", async (req, res) => {
+  try {
+    await archiveOldWinstonLogs();
+    res.status(200).json({
+      message: "Archive job completed successfully",
+    });
+  } catch (err) {
+    logger.error("Error triggering archive job:", err);
+    res
+      .status(500)
+      .json({ error: "Failed to archive old logs", details: err.message });
+  }
+});
+
+
 // =============================================================================
 // MATERIALIZED VIEW REFRESH FOR NEW/RETURNING USERS
 // =============================================================================
@@ -1248,6 +1448,10 @@ async function refreshMaterializedViews() {
 
 // Schedule materialized view refresh every 15 minutes
 cron.schedule(MV_REFRESH_SCHEDULE, async () => {
+  if (isShuttingDown) {
+    logger.warn('[MV_REFRESH] Skipping run — application shutting down');
+    return;
+  }
   // Check if already refreshing
   if (isRefreshingMaterializedViews) {
     logger.warn(
@@ -1332,7 +1536,7 @@ async function startServer() {
     await loadEventProcessors.loadFromDatabase(pool);
 
     // Start Express server
-    const server = app.listen(PORT, () => {
+    server = app.listen(PORT, () => {
       logger.info(`Telemetry log processor service started on port ${PORT}`);
     });
 
@@ -1358,12 +1562,37 @@ async function startServer() {
   }
 }
 
-// Handle shutdown gracefully
-process.on("SIGTERM", () => {
-  logger.info("SIGTERM received, shutting down gracefully");
-  pool.end();
-  process.exit(0);
-});
+async function shutdown(reason) {
+  if (isShuttingDown) return; // avoid double shutdown
+  isShuttingDown = true;
+
+  console.log(`[SHUTDOWN] Initiated due to: ${reason || 'manual stop'}`);
+
+  try {
+    // Close server if running
+    if (server) {
+      console.log('[SHUTDOWN] Closing HTTP server...');
+      await new Promise((resolve) => server.close(resolve));
+      console.log('[SHUTDOWN] HTTP server closed');
+    }
+
+    // Close DB pool
+    console.log('[SHUTDOWN] Closing DB pool...');
+    await pool.end();
+    console.log('[SHUTDOWN] DB pool closed');
+  } catch (err) {
+    console.error('[SHUTDOWN] Error during cleanup:', err);
+  }
+
+  // Decide exit code
+  // 0 -> manual stop (docker won't restart)
+  // 1 -> crash/error (docker restarts)
+  const exitCode =
+    reason === 'SIGINT' || reason === 'SIGTERM' ? 0 : 1;
+
+  console.log(`[SHUTDOWN] Exiting with code ${exitCode}`);
+  process.exit(exitCode);
+}
 
 // Export for testing
 module.exports = {

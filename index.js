@@ -839,7 +839,24 @@ async function processQuestionData(client, event) {
       event.edata?.eks?.target?.questionsDetails?.groupDetails || [];
     const channel = event.channel;
     const etsRaw = event.ets;
-    const ets = Number(etsRaw);
+    // Validate and convert ets to number
+    let ets;
+    if (typeof etsRaw === 'number') {
+      ets = etsRaw;
+    } else if (typeof etsRaw === 'string') {
+      ets = Number(etsRaw);
+    } else {
+      ets = NaN;
+    }
+
+    // Check if ets is a valid finite number
+    if (!Number.isFinite(ets)) {
+      const etsPreview = typeof etsRaw === 'string' ? etsRaw.substring(0, 100) : JSON.stringify(etsRaw);
+      throw new Error(
+        `invalid input syntax for type bigint: "${etsPreview}"`
+      );
+    }
+
     const questionText =
       event.edata?.eks?.target?.questionsDetails?.questionText;
     const questionSource =
@@ -847,11 +864,6 @@ async function processQuestionData(client, event) {
     const answerText = event.edata?.eks?.target?.questionsDetails?.answerText;
     const answer = answerText?.answer;
 
-    if (!Number.isFinite(ets)) {
-      throw new Error(
-        `Invalid ets value. Expected bigint timestamp, got: ${JSON.stringify(etsRaw)}`
-      );
-    }
 
     // Insert data into questions table
     // await client.query(

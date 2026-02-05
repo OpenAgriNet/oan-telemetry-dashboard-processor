@@ -707,15 +707,44 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
               `[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] mid: ${eventMid} - Matched processor '${key}' for event type '${eventType}'`,
             );
 
-            const processorStartTime = Date.now();
-            await processor["process"](client, event);
-            const processorDuration = Date.now() - processorStartTime;
+            // const processorStartTime = Date.now();
+            // await processor["process"](client, event);
+            // const processorDuration = Date.now() - processorStartTime;
 
-            logger.info(
-              `[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] mid: ${eventMid} - Processor '${key}' completed in ${processorDuration}ms`,
-            );
-            eventProcessed = true;
-            totalEventsProcessed++;
+            // logger.info(
+            //   `[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] mid: ${eventMid} - Processor '${key}' completed in ${processorDuration}ms`,
+            // );
+            // eventProcessed = true;
+            // totalEventsProcessed++;
+            // break;
+
+            const processorStartTime = Date.now();
+
+            try {
+              await processor["process"](client, event);
+
+              const processorDuration = Date.now() - processorStartTime;
+              logger.info(
+                `[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] mid: ${eventMid} - Processor '${key}' completed in ${processorDuration}ms`,
+              );
+
+              eventProcessed = true;
+              totalEventsProcessed++;
+            } catch (err) {
+              logger.error(
+                `[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] mid: ${eventMid} - Processor '${key}' failed: ${err.message}`,
+              );
+
+              await client.query(
+                `INSERT INTO dead_letter_logs(level, message, meta, event_name)
+     VALUES ($1, $2, $3, $4)`,
+                [log.level, JSON.stringify(event), log.meta, eventType],
+              );
+
+              deadLetterCount++;
+              eventProcessed = true; // IMPORTANT: mark as handled
+            }
+
             break;
           }
         }
@@ -809,13 +838,20 @@ async function processQuestionData(client, event) {
     const groupDetails =
       event.edata?.eks?.target?.questionsDetails?.groupDetails || [];
     const channel = event.channel;
-    const ets = event.ets;
+    const etsRaw = event.ets;
+    const ets = Number(etsRaw);
     const questionText =
       event.edata?.eks?.target?.questionsDetails?.questionText;
     const questionSource =
       event.edata?.eks?.target?.questionsDetails?.questionSource;
     const answerText = event.edata?.eks?.target?.questionsDetails?.answerText;
     const answer = answerText?.answer;
+
+    if (!Number.isFinite(ets)) {
+      throw new Error(
+        `Invalid ets value. Expected bigint timestamp, got: ${JSON.stringify(etsRaw)}`
+      );
+    }
 
     // Insert data into questions table
     // await client.query(

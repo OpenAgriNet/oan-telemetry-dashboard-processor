@@ -30,12 +30,12 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 
 process.on('uncaughtException', (err) => {
   logger.error('[FATAL] Uncaught Exception', err);
-  shutdown('uncaughtException');
+  process.exit(1); // immediate
 });
 
 process.on('unhandledRejection', (reason) => {
   logger.error('[FATAL] Unhandled Promise Rejection', reason);
-  shutdown('unhandledRejection');
+  process.exit(1); // immediate
 });
 
 // Load environment variables from .env file
@@ -1434,35 +1434,40 @@ async function startServer() {
 }
 
 async function shutdown(reason) {
-  if (isShuttingDown) return; // avoid double shutdown
+  if (isShuttingDown) return;
   isShuttingDown = true;
 
-  console.log(`[SHUTDOWN] Initiated due to: ${reason || 'manual stop'}`);
+  console.error(`[SHUTDOWN] Initiated due to: ${reason}`);
+
+  // 🔥 HARD GUARANTEE EXIT
+  const forceExitTimer = setTimeout(() => {
+    console.error('[SHUTDOWN] Force exiting after timeout');
+    process.exit(reason === 'SIGINT' || reason === 'SIGTERM' ? 0 : 1);
+  }, 10_000);
+
+  forceExitTimer.unref();
 
   try {
-    // Close server if running
     if (server) {
-      console.log('[SHUTDOWN] Closing HTTP server...');
-      await new Promise((resolve) => server.close(resolve));
-      console.log('[SHUTDOWN] HTTP server closed');
+      server.close(() => {
+        console.log('[SHUTDOWN] HTTP server closed');
+      });
     }
 
-    // Close DB pool
-    console.log('[SHUTDOWN] Closing DB pool...');
-    await pool.end();
-    console.log('[SHUTDOWN] DB pool closed');
+    if (pool) {
+      console.log('[SHUTDOWN] Closing DB pool...');
+      await pool.end(); // may hang — timer saves us
+      console.log('[SHUTDOWN] DB pool closed');
+    }
   } catch (err) {
     console.error('[SHUTDOWN] Error during cleanup:', err);
+  } finally {
+    clearTimeout(forceExitTimer);
+    const exitCode =
+      reason === 'SIGINT' || reason === 'SIGTERM' ? 0 : 1;
+    console.error(`[SHUTDOWN] Exiting with code ${exitCode}`);
+    process.exit(exitCode);
   }
-
-  // Decide exit code
-  // 0 -> manual stop (docker won't restart)
-  // 1 -> crash/error (docker restarts)
-  const exitCode =
-    reason === 'SIGINT' || reason === 'SIGTERM' ? 0 : 1;
-
-  console.log(`[SHUTDOWN] Exiting with code ${exitCode}`);
-  process.exit(exitCode);
 }
 
 // Export for testing

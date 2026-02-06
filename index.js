@@ -132,10 +132,55 @@ const LEADERBOARD_REFRESH_SCHEDULE =
   process.env.LEADERBOARD_REFRESH_SCHEDULE || "0 1 * * *"; // Run at 1 AM every day
 const IS_NEW_BACKFILL_SCHEDULE = process.env.IS_NEW_BACKFILL_SCHEDULE || "*/30 * * * *" ; // Run every 30 minutes
 
+// Ensure winston_logs table has sync_status column
+async function ensureWinstonLogsSyncStatus() {
+  const client = await pool.connect();
+  try {
+    // Check if sync_status column exists
+    const columnExists = await client.query(`
+      SELECT EXISTS (
+        SELECT 1 
+        FROM information_schema.columns 
+        WHERE table_schema = 'public' 
+        AND table_name = 'winston_logs' 
+        AND column_name = 'sync_status'
+      )
+    `);
+
+    if (!columnExists.rows[0].exists) {
+      logger.info("Adding sync_status column to winston_logs table...");
+      await client.query(`
+        ALTER TABLE public.winston_logs 
+        ADD COLUMN IF NOT EXISTS sync_status integer DEFAULT 0
+      `);
+      
+      // Set all existing rows to sync_status = 0 so they get processed
+      // (This handles the case where column was just added with NULL values)
+      await client.query(`
+        UPDATE public.winston_logs 
+        SET sync_status = 0 
+        WHERE sync_status IS NULL
+      `);
+      
+      logger.info("Successfully added sync_status column to winston_logs table");
+    } else {
+      logger.debug("sync_status column already exists in winston_logs table");
+    }
+  } catch (err) {
+    logger.error("Error ensuring sync_status column exists:", err);
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 // Ensure necessary tables exist
 async function ensureTablesExist() {
   const client = await pool.connect();
   try {
+    // First ensure winston_logs has sync_status column
+    await ensureWinstonLogsSyncStatus();
+
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.dead_letter_logs (
         level character varying COLLATE pg_catalog."default",
@@ -1084,12 +1129,12 @@ module.exports = {
   startServer,
   processTelemetryLogs,
   ensureTablesExist,
+  ensureWinstonLogsSyncStatus,
   parseTelemetryMessage,
+  pool,
 };
 
 // Only start server if this file is run directly (not when required in tests)
 if (require.main === module) {
   startServer();
 }
-
-module.exports = { app, pool };

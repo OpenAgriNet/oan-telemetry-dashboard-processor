@@ -169,6 +169,7 @@ async function ensureTablesExist() {
         registered_location JSONB,
         device_location JSONB,
         agristack_location JSONB,
+        fingerprint_id VARCHAR(64),
         created_at TIMESTAMP DEFAULT NOW()
       )
     `);
@@ -227,6 +228,9 @@ async function ensureTablesExist() {
         IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='questions' AND column_name='agristack_location') THEN
           ALTER TABLE public.questions ADD COLUMN agristack_location JSONB;
         END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='questions' AND column_name='fingerprint_id') THEN
+          ALTER TABLE public.questions ADD COLUMN fingerprint_id VARCHAR(64);
+        END IF;
       END $$;
     `);
 
@@ -249,6 +253,7 @@ async function ensureTablesExist() {
         registered_location JSONB,
         device_location JSONB,
         agristack_location JSONB,
+        fingerprint_id VARCHAR(64),
         created_at TIMESTAMP DEFAULT NOW()
       )
     `);
@@ -284,6 +289,9 @@ async function ensureTablesExist() {
         IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='errordetails' AND column_name='agristack_location') THEN
           ALTER TABLE public.errorDetails ADD COLUMN agristack_location JSONB;
         END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='errordetails' AND column_name='fingerprint_id') THEN
+          ALTER TABLE public.errorDetails ADD COLUMN fingerprint_id VARCHAR(64);
+        END IF;
       END $$;
     `);
 
@@ -310,6 +318,7 @@ async function ensureTablesExist() {
         registered_location JSONB,
         device_location JSONB,
         agristack_location JSONB,
+        fingerprint_id VARCHAR(64),
         created_at TIMESTAMP DEFAULT NOW()
       )
     `);
@@ -344,6 +353,9 @@ async function ensureTablesExist() {
         END IF;
         IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='feedback' AND column_name='agristack_location') THEN
           ALTER TABLE public.feedback ADD COLUMN agristack_location JSONB;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='feedback' AND column_name='fingerprint_id') THEN
+          ALTER TABLE public.feedback ADD COLUMN fingerprint_id VARCHAR(64);
         END IF;
       END $$;
     `);
@@ -400,7 +412,8 @@ async function ensureTablesExist() {
           "farmer_id": "edata.eks.target.farmer_id",
           "registered_location": "edata.eks.target.registered_location",
           "device_location": "edata.eks.target.device_location",
-          "agristack_location": "edata.eks.target.agristack_location"
+          "agristack_location": "edata.eks.target.agristack_location",
+          "fingerprint_id": "edata.eks.fingerprint_details.device_id"
         }','edata.eks.target.questionsDetails')
       ON CONFLICT DO NOTHING;
     `);
@@ -426,7 +439,8 @@ async function ensureTablesExist() {
           "farmer_id": "edata.eks.target.farmer_id",
           "registered_location": "edata.eks.target.registered_location",
           "device_location": "edata.eks.target.device_location",
-          "agristack_location": "edata.eks.target.agristack_location"
+          "agristack_location": "edata.eks.target.agristack_location",
+          "fingerprint_id": "edata.eks.fingerprint_details.device_id"
         }',
         field_verification = 'edata.eks.target.questionsDetails',
         updated_at = NOW()
@@ -451,7 +465,8 @@ async function ensureTablesExist() {
           "farmer_id": "edata.eks.target.farmer_id",
           "registered_location": "edata.eks.target.registered_location",
           "device_location": "edata.eks.target.device_location",
-          "agristack_location": "edata.eks.target.agristack_location"
+          "agristack_location": "edata.eks.target.agristack_location",
+          "fingerprint_id": "edata.eks.fingerprint_details.device_id"
         }','edata.eks.target.errorDetails')
       ON CONFLICT DO NOTHING;
     `);
@@ -474,7 +489,8 @@ async function ensureTablesExist() {
           "farmer_id": "edata.eks.target.farmer_id",
           "registered_location": "edata.eks.target.registered_location",
           "device_location": "edata.eks.target.device_location",
-          "agristack_location": "edata.eks.target.agristack_location"
+          "agristack_location": "edata.eks.target.agristack_location",
+          "fingerprint_id": "edata.eks.fingerprint_details.device_id"
         }',
         field_verification = 'edata.eks.target.errorDetails',
         updated_at = NOW()
@@ -503,7 +519,8 @@ async function ensureTablesExist() {
           "farmer_id": "edata.eks.target.farmer_id",
           "registered_location": "edata.eks.target.registered_location",
           "device_location": "edata.eks.target.device_location",
-          "agristack_location": "edata.eks.target.agristack_location"
+          "agristack_location": "edata.eks.target.agristack_location",
+          "fingerprint_id": "edata.eks.fingerprint_details.device_id"
         }','edata.eks.target.feedbackDetails')
       ON CONFLICT DO NOTHING;
     `);
@@ -530,7 +547,8 @@ async function ensureTablesExist() {
           "farmer_id": "edata.eks.target.farmer_id",
           "registered_location": "edata.eks.target.registered_location",
           "device_location": "edata.eks.target.device_location",
-          "agristack_location": "edata.eks.target.agristack_location"
+          "agristack_location": "edata.eks.target.agristack_location",
+          "fingerprint_id": "edata.eks.fingerprint_details.device_id"
         }',
         field_verification = 'edata.eks.target.feedbackDetails',
         updated_at = NOW()
@@ -688,6 +706,7 @@ async function processUserData(client, event) {
   try {
     const target = event.edata?.eks?.target || {};
     const fingerprint = event.edata?.eks?.fingerprint_details;
+    const eventTimestamp = new Date(Number(event.ets));
 
     // Use fingerprint device_id as uid if available, otherwise fallback to event.uid
     let uid = fingerprint?.device_id ? `fp_${fingerprint.device_id}` : event.uid;
@@ -707,7 +726,7 @@ async function processUserData(client, event) {
                          device_code, device_name, device_model,
                          os_code, os_name, os_version,
                          first_seen_at, last_seen_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, NOW(), NOW())
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
       ON CONFLICT (uid) DO UPDATE SET
         mobile = COALESCE(EXCLUDED.mobile, users.mobile),
         username = COALESCE(EXCLUDED.username, users.username),
@@ -727,7 +746,7 @@ async function processUserData(client, event) {
         os_code = COALESCE(EXCLUDED.os_code, users.os_code),
         os_name = COALESCE(EXCLUDED.os_name, users.os_name),
         os_version = COALESCE(EXCLUDED.os_version, users.os_version),
-        last_seen_at = NOW()
+        last_seen_at = EXCLUDED.last_seen_at
       RETURNING id
     `, [
       uid,
@@ -748,7 +767,9 @@ async function processUserData(client, event) {
       fingerprint?.device?.model || null,
       fingerprint?.os?.code || null,
       fingerprint?.os?.name || null,
-      fingerprint?.os?.version || null
+      fingerprint?.os?.version || null,
+      eventTimestamp,
+      eventTimestamp
     ]);
 
     const userId = result.rows[0]?.id;

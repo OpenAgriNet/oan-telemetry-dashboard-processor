@@ -115,7 +115,7 @@ async function ensureVillagesSeeded() {
   try {
     await ensureVillagesSeeded();
     // continue with the rest of your startup:
-    // await ensureTablesExist();
+    await ensureTablesExist();
     // await loadEventProcessors.loadFromDatabase(pool);
     // start server...
   } catch (err) {

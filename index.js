@@ -147,6 +147,17 @@ async function ensureTablesExist() {
       )
     `);
 
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.winston_logs (
+        id SERIAL PRIMARY KEY,
+        level character varying COLLATE pg_catalog."default",
+        message text COLLATE pg_catalog."default",
+        meta json,
+        "timestamp" timestamp without time zone DEFAULT now(),
+        sync_status integer DEFAULT 0
+      )
+    `);
+
     // Create questions table if not exists
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.questions (

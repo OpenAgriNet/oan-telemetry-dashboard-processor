@@ -136,20 +136,45 @@ const MV_REFRESH_SCHEDULE = process.env.MV_REFRESH_SCHEDULE || "*/15 * * * *"; /
 async function ensureTablesExist() {
   const client = await pool.connect();
   try {
+    // Create winston_logs table if not exists
     await client.query(`
-      CREATE TABLE IF NOT EXISTS public.dead_letter_logs (
-        level character varying COLLATE pg_catalog."default",
-        event_name character varying COLLATE pg_catalog."default",
-        message character varying COLLATE pg_catalog."default",
-        meta json,
-        "timestamp" timestamp without time zone DEFAULT now(),
-        sync_status integer DEFAULT 0
-      )
+      CREATE TABLE IF NOT EXISTS public.winston_logs(
+      id UUID DEFAULT gen_random_uuid(),
+      level character varying COLLATE pg_catalog."default",
+      message character varying COLLATE pg_catalog."default",
+      meta json,
+      "timestamp" timestamp without time zone DEFAULT now(),
+      sync_status integer DEFAULT 0
+    )
+      `);
+
+    // Add missing columns to winston_logs table if they don't exist
+    await client.query(`
+      DO $$ 
+      BEGIN 
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'winston_logs' AND column_name = 'id') THEN
+          ALTER TABLE public.winston_logs ADD COLUMN id UUID DEFAULT gen_random_uuid();
+        END IF;
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'winston_logs' AND column_name = 'sync_status') THEN
+          ALTER TABLE public.winston_logs ADD COLUMN sync_status INTEGER DEFAULT 0;
+        END IF;
+      END $$;
     `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.dead_letter_logs(
+      level character varying COLLATE pg_catalog."default",
+      event_name character varying COLLATE pg_catalog."default",
+      message character varying COLLATE pg_catalog."default",
+      meta json,
+      "timestamp" timestamp without time zone DEFAULT now(),
+      sync_status integer DEFAULT 0
+    )
+      `);
 
     // Create questions table if not exists
     await client.query(`
-      CREATE TABLE IF NOT EXISTS public.questions (
+      CREATE TABLE IF NOT EXISTS public.questions(
         id UUID DEFAULT gen_random_uuid(),
         unique_id VARCHAR,
         uid VARCHAR,
@@ -172,11 +197,11 @@ async function ensureTablesExist() {
         fingerprint_id VARCHAR(64),
         created_at TIMESTAMP DEFAULT NOW()
       )
-    `);
+      `);
 
     // Create leaderboard table if not exists
     await client.query(`
-      CREATE TABLE IF NOT EXISTS public.leaderboard (
+      CREATE TABLE IF NOT EXISTS public.leaderboard(
         unique_id VARCHAR NOT NULL,
         mobile VARCHAR,
         username VARCHAR,
@@ -189,107 +214,107 @@ async function ensureTablesExist() {
         taluka_code INTEGER,
         district_code INTEGER,
         last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (unique_id)
+        PRIMARY KEY(unique_id)
       )
-    `);
+      `);
 
     await client.query(`
       ALTER TABLE public.questions
-  ADD COLUMN IF NOT EXISTS is_new SMALLINT DEFAULT 0 NOT NULL;`)
+  ADD COLUMN IF NOT EXISTS is_new SMALLINT DEFAULT 0 NOT NULL; `)
 
     // Add missing columns to questions table if they don't exist
     await client.query(`
-      DO $$ 
-      BEGIN 
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='questions' AND column_name='unique_id') THEN
+      DO $$
+    BEGIN 
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'questions' AND column_name = 'unique_id') THEN
           ALTER TABLE public.questions ADD COLUMN unique_id VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='questions' AND column_name='mobile') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'questions' AND column_name = 'mobile') THEN
           ALTER TABLE public.questions ADD COLUMN mobile VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='questions' AND column_name='username') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'questions' AND column_name = 'username') THEN
           ALTER TABLE public.questions ADD COLUMN username VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='questions' AND column_name='email') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'questions' AND column_name = 'email') THEN
           ALTER TABLE public.questions ADD COLUMN email VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='questions' AND column_name='role') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'questions' AND column_name = 'role') THEN
           ALTER TABLE public.questions ADD COLUMN role VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='questions' AND column_name='farmer_id') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'questions' AND column_name = 'farmer_id') THEN
           ALTER TABLE public.questions ADD COLUMN farmer_id VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='questions' AND column_name='registered_location') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'questions' AND column_name = 'registered_location') THEN
           ALTER TABLE public.questions ADD COLUMN registered_location JSONB;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='questions' AND column_name='device_location') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'questions' AND column_name = 'device_location') THEN
           ALTER TABLE public.questions ADD COLUMN device_location JSONB;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='questions' AND column_name='agristack_location') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'questions' AND column_name = 'agristack_location') THEN
           ALTER TABLE public.questions ADD COLUMN agristack_location JSONB;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='questions' AND column_name='fingerprint_id') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'questions' AND column_name = 'fingerprint_id') THEN
           ALTER TABLE public.questions ADD COLUMN fingerprint_id VARCHAR(64);
         END IF;
       END $$;
     `);
 
     await client.query(`
-      CREATE TABLE IF NOT EXISTS public.errorDetails (
-        id UUID DEFAULT gen_random_uuid(),
-        unique_id VARCHAR,
-        uid VARCHAR,
-        sid VARCHAR,
-        groupdetails TEXT,
-        channel VARCHAR,
-        ets BIGINT,
-        qid VARCHAR,
-        errorText TEXT,
-        mobile VARCHAR,
-        username VARCHAR,
-        email VARCHAR,
-        role VARCHAR,
-        farmer_id VARCHAR,
-        registered_location JSONB,
-        device_location JSONB,
-        agristack_location JSONB,
-        fingerprint_id VARCHAR(64),
-        created_at TIMESTAMP DEFAULT NOW()
-      )
-    `);
+      CREATE TABLE IF NOT EXISTS public.errorDetails(
+      id UUID DEFAULT gen_random_uuid(),
+      unique_id VARCHAR,
+      uid VARCHAR,
+      sid VARCHAR,
+      groupdetails TEXT,
+      channel VARCHAR,
+      ets BIGINT,
+      qid VARCHAR,
+      errorText TEXT,
+      mobile VARCHAR,
+      username VARCHAR,
+      email VARCHAR,
+      role VARCHAR,
+      farmer_id VARCHAR,
+      registered_location JSONB,
+      device_location JSONB,
+      agristack_location JSONB,
+      fingerprint_id VARCHAR(64),
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+      `);
 
     // Add missing columns to errorDetails table if they don't exist
     await client.query(`
-      DO $$ 
-      BEGIN 
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='errordetails' AND column_name='unique_id') THEN
+      DO $$
+    BEGIN 
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'errordetails' AND column_name = 'unique_id') THEN
           ALTER TABLE public.errorDetails ADD COLUMN unique_id VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='errordetails' AND column_name='mobile') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'errordetails' AND column_name = 'mobile') THEN
           ALTER TABLE public.errorDetails ADD COLUMN mobile VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='errordetails' AND column_name='username') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'errordetails' AND column_name = 'username') THEN
           ALTER TABLE public.errorDetails ADD COLUMN username VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='errordetails' AND column_name='email') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'errordetails' AND column_name = 'email') THEN
           ALTER TABLE public.errorDetails ADD COLUMN email VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='errordetails' AND column_name='role') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'errordetails' AND column_name = 'role') THEN
           ALTER TABLE public.errorDetails ADD COLUMN role VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='errordetails' AND column_name='farmer_id') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'errordetails' AND column_name = 'farmer_id') THEN
           ALTER TABLE public.errorDetails ADD COLUMN farmer_id VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='errordetails' AND column_name='registered_location') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'errordetails' AND column_name = 'registered_location') THEN
           ALTER TABLE public.errorDetails ADD COLUMN registered_location JSONB;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='errordetails' AND column_name='device_location') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'errordetails' AND column_name = 'device_location') THEN
           ALTER TABLE public.errorDetails ADD COLUMN device_location JSONB;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='errordetails' AND column_name='agristack_location') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'errordetails' AND column_name = 'agristack_location') THEN
           ALTER TABLE public.errorDetails ADD COLUMN agristack_location JSONB;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='errordetails' AND column_name='fingerprint_id') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'errordetails' AND column_name = 'fingerprint_id') THEN
           ALTER TABLE public.errorDetails ADD COLUMN fingerprint_id VARCHAR(64);
         END IF;
       END $$;
@@ -297,64 +322,64 @@ async function ensureTablesExist() {
 
     // Create feedback table if not exists
     await client.query(`
-      CREATE TABLE IF NOT EXISTS public.feedback (
-        id UUID DEFAULT gen_random_uuid(),
-        unique_id VARCHAR,
-        uid VARCHAR,
-        sid VARCHAR,
-        groupdetails JSONB,
-        channel VARCHAR,
-        ets BIGINT,
-        feedbackText TEXT,
-        questionText TEXT,
-        answerText TEXT,
-        qid VARCHAR,
-        feedbackType TEXT,
-        mobile VARCHAR,
-        username VARCHAR,
-        email VARCHAR,
-        role VARCHAR,
-        farmer_id VARCHAR,
-        registered_location JSONB,
-        device_location JSONB,
-        agristack_location JSONB,
-        fingerprint_id VARCHAR(64),
-        created_at TIMESTAMP DEFAULT NOW()
-      )
-    `);
+      CREATE TABLE IF NOT EXISTS public.feedback(
+      id UUID DEFAULT gen_random_uuid(),
+      unique_id VARCHAR,
+      uid VARCHAR,
+      sid VARCHAR,
+      groupdetails JSONB,
+      channel VARCHAR,
+      ets BIGINT,
+      feedbackText TEXT,
+      questionText TEXT,
+      answerText TEXT,
+      qid VARCHAR,
+      feedbackType TEXT,
+      mobile VARCHAR,
+      username VARCHAR,
+      email VARCHAR,
+      role VARCHAR,
+      farmer_id VARCHAR,
+      registered_location JSONB,
+      device_location JSONB,
+      agristack_location JSONB,
+      fingerprint_id VARCHAR(64),
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+      `);
 
     // Add missing columns to feedback table if they don't exist
     await client.query(`
-      DO $$ 
-      BEGIN 
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='feedback' AND column_name='unique_id') THEN
+      DO $$
+    BEGIN 
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'feedback' AND column_name = 'unique_id') THEN
           ALTER TABLE public.feedback ADD COLUMN unique_id VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='feedback' AND column_name='mobile') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'feedback' AND column_name = 'mobile') THEN
           ALTER TABLE public.feedback ADD COLUMN mobile VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='feedback' AND column_name='username') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'feedback' AND column_name = 'username') THEN
           ALTER TABLE public.feedback ADD COLUMN username VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='feedback' AND column_name='email') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'feedback' AND column_name = 'email') THEN
           ALTER TABLE public.feedback ADD COLUMN email VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='feedback' AND column_name='role') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'feedback' AND column_name = 'role') THEN
           ALTER TABLE public.feedback ADD COLUMN role VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='feedback' AND column_name='farmer_id') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'feedback' AND column_name = 'farmer_id') THEN
           ALTER TABLE public.feedback ADD COLUMN farmer_id VARCHAR;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='feedback' AND column_name='registered_location') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'feedback' AND column_name = 'registered_location') THEN
           ALTER TABLE public.feedback ADD COLUMN registered_location JSONB;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='feedback' AND column_name='device_location') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'feedback' AND column_name = 'device_location') THEN
           ALTER TABLE public.feedback ADD COLUMN device_location JSONB;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='feedback' AND column_name='agristack_location') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'feedback' AND column_name = 'agristack_location') THEN
           ALTER TABLE public.feedback ADD COLUMN agristack_location JSONB;
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='feedback' AND column_name='fingerprint_id') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'feedback' AND column_name = 'fingerprint_id') THEN
           ALTER TABLE public.feedback ADD COLUMN fingerprint_id VARCHAR(64);
         END IF;
       END $$;
@@ -362,198 +387,198 @@ async function ensureTablesExist() {
 
     // Create event_processors table if not exists
     await client.query(`
-      CREATE TABLE IF NOT EXISTS public.event_processors (
-        id SERIAL PRIMARY KEY,
-        event_type VARCHAR NOT NULL,
-        table_name VARCHAR NOT NULL UNIQUE,
-        field_verification VARCHAR NOT NULL,
-        field_mappings JSONB NOT NULL,
-        is_active BOOLEAN DEFAULT TRUE,
-        created_at TIMESTAMP DEFAULT NOW(),
-        updated_at TIMESTAMP DEFAULT NOW()
-      )
-    `);
+      CREATE TABLE IF NOT EXISTS public.event_processors(
+      id SERIAL PRIMARY KEY,
+      event_type VARCHAR NOT NULL,
+      table_name VARCHAR NOT NULL UNIQUE,
+      field_verification VARCHAR NOT NULL,
+      field_mappings JSONB NOT NULL,
+      is_active BOOLEAN DEFAULT TRUE,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    )
+      `);
 
     // Ensure required columns/indexes exist for existing deployments
     await client.query(`
       DO $$
-      BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns 
+    BEGIN
+        IF NOT EXISTS(
+      SELECT 1 FROM information_schema.columns 
           WHERE table_schema = 'public' AND table_name = 'event_processors' AND column_name = 'field_verification'
-        ) THEN
+    ) THEN
           ALTER TABLE public.event_processors ADD COLUMN field_verification VARCHAR;
         END IF;
       END $$;
     `);
     await client.query(`
-      CREATE UNIQUE INDEX IF NOT EXISTS event_processors_table_name_key ON public.event_processors (table_name);
+      CREATE UNIQUE INDEX IF NOT EXISTS event_processors_table_name_key ON public.event_processors(table_name);
     `);
 
     // Insert default event processors if they don't exist
     await client.query(`
-      INSERT INTO public.event_processors (event_type, table_name, field_mappings, field_verification)
-      VALUES 
-        ('OE_ITEM_RESPONSE', 'questions', '{
+      INSERT INTO public.event_processors(event_type, table_name, field_mappings, field_verification)
+    VALUES
+      ('OE_ITEM_RESPONSE', 'questions', '{
           "unique_id": "edata.eks.target.unique_id",
-          "uid": "uid",
-          "sid": "sid",
-          "groupDetails": "edata.eks.target.questionsDetails.groupDetails",
-          "channel": "channel",
-          "ets": "ets",
-          "questionText": "edata.eks.target.questionsDetails.questionText",
-          "questionSource": "edata.eks.target.questionsDetails.questionSource",
-          "answerText": "edata.eks.target.questionsDetails.answerText",
-          "answer": "edata.eks.target.questionsDetails.answerText.answer",
-          "mobile": "edata.eks.target.mobile",
-          "username": "edata.eks.target.username",
-          "email": "edata.eks.target.email",
-          "role": "edata.eks.target.role",
-          "farmer_id": "edata.eks.target.farmer_id",
-          "registered_location": "edata.eks.target.registered_location",
-          "device_location": "edata.eks.target.device_location",
-          "agristack_location": "edata.eks.target.agristack_location",
-          "fingerprint_id": "edata.eks.fingerprint_details.device_id"
+        "uid": "uid",
+        "sid": "sid",
+        "groupDetails": "edata.eks.target.questionsDetails.groupDetails",
+        "channel": "channel",
+        "ets": "ets",
+        "questionText": "edata.eks.target.questionsDetails.questionText",
+        "questionSource": "edata.eks.target.questionsDetails.questionSource",
+        "answerText": "edata.eks.target.questionsDetails.answerText",
+        "answer": "edata.eks.target.questionsDetails.answerText.answer",
+        "mobile": "edata.eks.target.mobile",
+        "username": "edata.eks.target.username",
+        "email": "edata.eks.target.email",
+        "role": "edata.eks.target.role",
+        "farmer_id": "edata.eks.target.farmer_id",
+        "registered_location": "edata.eks.target.registered_location",
+        "device_location": "edata.eks.target.device_location",
+        "agristack_location": "edata.eks.target.agristack_location",
+        "fingerprint_id": "edata.eks.fingerprint_details.device_id"
         }','edata.eks.target.questionsDetails')
       ON CONFLICT DO NOTHING;
-    `);
+  `);
     await client.query(`
       UPDATE public.event_processors
-      SET 
-        event_type = 'OE_ITEM_RESPONSE',
-        field_mappings = '{
-          "unique_id": "edata.eks.target.unique_id",
-          "uid": "uid",
-          "sid": "sid",
-          "groupDetails": "edata.eks.target.questionsDetails.groupDetails",
+  SET
+  event_type = 'OE_ITEM_RESPONSE',
+    field_mappings = '{
+  "unique_id": "edata.eks.target.unique_id",
+    "uid": "uid",
+      "sid": "sid",
+        "groupDetails": "edata.eks.target.questionsDetails.groupDetails",
           "channel": "channel",
-          "ets": "ets",
-          "questionText": "edata.eks.target.questionsDetails.questionText",
-          "questionSource": "edata.eks.target.questionsDetails.questionSource",
-          "answerText": "edata.eks.target.questionsDetails.answerText",
-          "answer": "edata.eks.target.questionsDetails.answerText.answer",
-          "mobile": "edata.eks.target.mobile",
-          "username": "edata.eks.target.username",
-          "email": "edata.eks.target.email",
-          "role": "edata.eks.target.role",
-          "farmer_id": "edata.eks.target.farmer_id",
-          "registered_location": "edata.eks.target.registered_location",
-          "device_location": "edata.eks.target.device_location",
-          "agristack_location": "edata.eks.target.agristack_location",
-          "fingerprint_id": "edata.eks.fingerprint_details.device_id"
-        }',
-        field_verification = 'edata.eks.target.questionsDetails',
-        updated_at = NOW()
+            "ets": "ets",
+              "questionText": "edata.eks.target.questionsDetails.questionText",
+                "questionSource": "edata.eks.target.questionsDetails.questionSource",
+                  "answerText": "edata.eks.target.questionsDetails.answerText",
+                    "answer": "edata.eks.target.questionsDetails.answerText.answer",
+                      "mobile": "edata.eks.target.mobile",
+                        "username": "edata.eks.target.username",
+                          "email": "edata.eks.target.email",
+                            "role": "edata.eks.target.role",
+                              "farmer_id": "edata.eks.target.farmer_id",
+                                "registered_location": "edata.eks.target.registered_location",
+                                  "device_location": "edata.eks.target.device_location",
+                                    "agristack_location": "edata.eks.target.agristack_location",
+                                      "fingerprint_id": "edata.eks.fingerprint_details.device_id"
+} ',
+field_verification = 'edata.eks.target.questionsDetails',
+  updated_at = NOW()
       WHERE table_name = 'questions';
-    `);
+`);
 
     await client.query(`
-      INSERT INTO public.event_processors (event_type, table_name, field_mappings, field_verification)
-      VALUES 
-        ('OE_ITEM_RESPONSE', 'errorDetails', '{
+      INSERT INTO public.event_processors(event_type, table_name, field_mappings, field_verification)
+VALUES
+  ('OE_ITEM_RESPONSE', 'errorDetails', '{
           "unique_id": "edata.eks.target.unique_id",
-          "uid": "uid",
-          "sid": "sid",
-          "channel": "channel",
-          "ets": "ets",
-          "errorText": "edata.eks.target.errorDetails.errorText",
-          "qid": "edata.eks.qid",
-          "mobile": "edata.eks.target.mobile",
-          "username": "edata.eks.target.username",
-          "email": "edata.eks.target.email",
-          "role": "edata.eks.target.role",
-          "farmer_id": "edata.eks.target.farmer_id",
-          "registered_location": "edata.eks.target.registered_location",
-          "device_location": "edata.eks.target.device_location",
-          "agristack_location": "edata.eks.target.agristack_location",
-          "fingerprint_id": "edata.eks.fingerprint_details.device_id"
+    "uid": "uid",
+    "sid": "sid",
+    "channel": "channel",
+    "ets": "ets",
+    "errorText": "edata.eks.target.errorDetails.errorText",
+    "qid": "edata.eks.qid",
+    "mobile": "edata.eks.target.mobile",
+    "username": "edata.eks.target.username",
+    "email": "edata.eks.target.email",
+    "role": "edata.eks.target.role",
+    "farmer_id": "edata.eks.target.farmer_id",
+    "registered_location": "edata.eks.target.registered_location",
+    "device_location": "edata.eks.target.device_location",
+    "agristack_location": "edata.eks.target.agristack_location",
+    "fingerprint_id": "edata.eks.fingerprint_details.device_id"
         }','edata.eks.target.errorDetails')
       ON CONFLICT DO NOTHING;
-    `);
+`);
     await client.query(`
       UPDATE public.event_processors
-      SET 
-        event_type = 'OE_ITEM_RESPONSE',
-        field_mappings = '{
-          "unique_id": "edata.eks.target.unique_id",
-          "uid": "uid",
-          "sid": "sid",
-          "channel": "channel",
-          "ets": "ets",
+SET
+event_type = 'OE_ITEM_RESPONSE',
+  field_mappings = '{
+"unique_id": "edata.eks.target.unique_id",
+  "uid": "uid",
+    "sid": "sid",
+      "channel": "channel",
+        "ets": "ets",
           "errorText": "edata.eks.target.errorDetails.errorText",
-          "qid": "edata.eks.qid",
-          "mobile": "edata.eks.target.mobile",
-          "username": "edata.eks.target.username",
-          "email": "edata.eks.target.email",
-          "role": "edata.eks.target.role",
-          "farmer_id": "edata.eks.target.farmer_id",
-          "registered_location": "edata.eks.target.registered_location",
-          "device_location": "edata.eks.target.device_location",
-          "agristack_location": "edata.eks.target.agristack_location",
-          "fingerprint_id": "edata.eks.fingerprint_details.device_id"
+            "qid": "edata.eks.qid",
+              "mobile": "edata.eks.target.mobile",
+                "username": "edata.eks.target.username",
+                  "email": "edata.eks.target.email",
+                    "role": "edata.eks.target.role",
+                      "farmer_id": "edata.eks.target.farmer_id",
+                        "registered_location": "edata.eks.target.registered_location",
+                          "device_location": "edata.eks.target.device_location",
+                            "agristack_location": "edata.eks.target.agristack_location",
+                              "fingerprint_id": "edata.eks.fingerprint_details.device_id"
         }',
-        field_verification = 'edata.eks.target.errorDetails',
-        updated_at = NOW()
+field_verification = 'edata.eks.target.errorDetails',
+  updated_at = NOW()
       WHERE table_name = 'errorDetails';
-    `);
+`);
 
     await client.query(`
-      INSERT INTO public.event_processors (event_type, table_name, field_mappings, field_verification)
-      VALUES 
-        ('OE_ITEM_RESPONSE', 'feedback', '{
+      INSERT INTO public.event_processors(event_type, table_name, field_mappings, field_verification)
+VALUES
+  ('OE_ITEM_RESPONSE', 'feedback', '{
           "unique_id": "edata.eks.target.unique_id",
-          "uid": "uid",
-          "sid": "sid",
-          "groupDetails": "edata.eks.target.questionsDetails.groupDetails",
-          "channel": "channel",
-          "ets": "ets",
-          "feedbackText": "edata.eks.target.feedbackDetails.feedbackText",
-          "questionText": "edata.eks.target.feedbackDetails.questionText",
-          "answerText": "edata.eks.target.feedbackDetails.answerText",
-          "feedbackType": "edata.eks.target.feedbackDetails.feedbackType",
-          "qid": "edata.eks.qid",
-          "mobile": "edata.eks.target.mobile",
-          "username": "edata.eks.target.username",
-          "email": "edata.eks.target.email",
-          "role": "edata.eks.target.role",
-          "farmer_id": "edata.eks.target.farmer_id",
-          "registered_location": "edata.eks.target.registered_location",
-          "device_location": "edata.eks.target.device_location",
-          "agristack_location": "edata.eks.target.agristack_location",
-          "fingerprint_id": "edata.eks.fingerprint_details.device_id"
+    "uid": "uid",
+    "sid": "sid",
+    "groupDetails": "edata.eks.target.questionsDetails.groupDetails",
+    "channel": "channel",
+    "ets": "ets",
+    "feedbackText": "edata.eks.target.feedbackDetails.feedbackText",
+    "questionText": "edata.eks.target.feedbackDetails.questionText",
+    "answerText": "edata.eks.target.feedbackDetails.answerText",
+    "feedbackType": "edata.eks.target.feedbackDetails.feedbackType",
+    "qid": "edata.eks.qid",
+    "mobile": "edata.eks.target.mobile",
+    "username": "edata.eks.target.username",
+    "email": "edata.eks.target.email",
+    "role": "edata.eks.target.role",
+    "farmer_id": "edata.eks.target.farmer_id",
+    "registered_location": "edata.eks.target.registered_location",
+    "device_location": "edata.eks.target.device_location",
+    "agristack_location": "edata.eks.target.agristack_location",
+    "fingerprint_id": "edata.eks.fingerprint_details.device_id"
         }','edata.eks.target.feedbackDetails')
       ON CONFLICT DO NOTHING;
-    `);
+`);
     await client.query(`
       UPDATE public.event_processors
-      SET 
-        event_type = 'OE_ITEM_RESPONSE',
-        field_mappings = '{
-          "unique_id": "edata.eks.target.unique_id",
-          "uid": "uid",
-          "sid": "sid",
-          "groupDetails": "edata.eks.target.questionsDetails.groupDetails",
-          "channel": "channel",
+SET
+event_type = 'OE_ITEM_RESPONSE',
+  field_mappings = '{
+"unique_id": "edata.eks.target.unique_id",
+  "uid": "uid",
+    "sid": "sid",
+      "groupDetails": "edata.eks.target.questionsDetails.groupDetails",
+        "channel": "channel",
           "ets": "ets",
-          "feedbackText": "edata.eks.target.feedbackDetails.feedbackText",
-          "questionText": "edata.eks.target.feedbackDetails.questionText",
-          "answerText": "edata.eks.target.feedbackDetails.answerText",
-          "feedbackType": "edata.eks.target.feedbackDetails.feedbackType",
-          "qid": "edata.eks.qid",
-          "mobile": "edata.eks.target.mobile",
-          "username": "edata.eks.target.username",
-          "email": "edata.eks.target.email",
-          "role": "edata.eks.target.role",
-          "farmer_id": "edata.eks.target.farmer_id",
-          "registered_location": "edata.eks.target.registered_location",
-          "device_location": "edata.eks.target.device_location",
-          "agristack_location": "edata.eks.target.agristack_location",
-          "fingerprint_id": "edata.eks.fingerprint_details.device_id"
+            "feedbackText": "edata.eks.target.feedbackDetails.feedbackText",
+              "questionText": "edata.eks.target.feedbackDetails.questionText",
+                "answerText": "edata.eks.target.feedbackDetails.answerText",
+                  "feedbackType": "edata.eks.target.feedbackDetails.feedbackType",
+                    "qid": "edata.eks.qid",
+                      "mobile": "edata.eks.target.mobile",
+                        "username": "edata.eks.target.username",
+                          "email": "edata.eks.target.email",
+                            "role": "edata.eks.target.role",
+                              "farmer_id": "edata.eks.target.farmer_id",
+                                "registered_location": "edata.eks.target.registered_location",
+                                  "device_location": "edata.eks.target.device_location",
+                                    "agristack_location": "edata.eks.target.agristack_location",
+                                      "fingerprint_id": "edata.eks.fingerprint_details.device_id"
         }',
-        field_verification = 'edata.eks.target.feedbackDetails',
-        updated_at = NOW()
+field_verification = 'edata.eks.target.feedbackDetails',
+  updated_at = NOW()
       WHERE table_name = 'feedback';
-    `);
+`);
 
 
     // ============================================
@@ -562,71 +587,71 @@ async function ensureTablesExist() {
 
     // Create users table for V2 (includes device metadata)
     await client.query(`
-      CREATE TABLE IF NOT EXISTS public.users (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        uid VARCHAR(255) UNIQUE NOT NULL,
-        -- User profile
+      CREATE TABLE IF NOT EXISTS public.users(
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  uid VARCHAR(255) UNIQUE NOT NULL,
+  --User profile
         mobile VARCHAR(20),
-        username VARCHAR(255),
-        email VARCHAR(255),
-        role VARCHAR(50),
-        farmer_id VARCHAR(100),
-        registered_location JSONB,
-        device_location JSONB,
-        agristack_location JSONB,
-        -- Device metadata (Fingerprint.js)
+  username VARCHAR(255),
+  email VARCHAR(255),
+  role VARCHAR(50),
+  farmer_id VARCHAR(100),
+  registered_location JSONB,
+  device_location JSONB,
+  agristack_location JSONB,
+  --Device metadata(Fingerprint.js)
         fingerprint_id VARCHAR(64),
-        browser_code VARCHAR(10),
-        browser_name VARCHAR(50),
-        browser_version VARCHAR(20),
-        device_code VARCHAR(10),
-        device_name VARCHAR(50),
-        device_model VARCHAR(100),
-        os_code VARCHAR(10),
-        os_name VARCHAR(50),
-        os_version VARCHAR(20),
-        -- Timestamps
+  browser_code VARCHAR(10),
+  browser_name VARCHAR(50),
+  browser_version VARCHAR(20),
+  device_code VARCHAR(10),
+  device_name VARCHAR(50),
+  device_model VARCHAR(100),
+  os_code VARCHAR(10),
+  os_name VARCHAR(50),
+  os_version VARCHAR(20),
+  --Timestamps
         first_seen_at TIMESTAMP,
-        last_seen_at TIMESTAMP,
-        created_at TIMESTAMP DEFAULT NOW()
-      )
-    `);
+  last_seen_at TIMESTAMP,
+  created_at TIMESTAMP DEFAULT NOW()
+)
+  `);
     // Add device columns if they don't exist (for existing deployments)
     await client.query(`
-      DO $$ 
-      BEGIN 
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name='fingerprint_id') THEN
+      DO $$
+BEGIN 
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'fingerprint_id') THEN
           ALTER TABLE public.users ADD COLUMN fingerprint_id VARCHAR(64);
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name='browser_code') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'browser_code') THEN
           ALTER TABLE public.users ADD COLUMN browser_code VARCHAR(10);
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name='browser_name') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'browser_name') THEN
           ALTER TABLE public.users ADD COLUMN browser_name VARCHAR(50);
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name='browser_version') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'browser_version') THEN
           ALTER TABLE public.users ADD COLUMN browser_version VARCHAR(20);
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name='device_code') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'device_code') THEN
           ALTER TABLE public.users ADD COLUMN device_code VARCHAR(10);
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name='device_name') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'device_name') THEN
           ALTER TABLE public.users ADD COLUMN device_name VARCHAR(50);
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name='device_model') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'device_model') THEN
           ALTER TABLE public.users ADD COLUMN device_model VARCHAR(100);
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name='os_code') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'os_code') THEN
           ALTER TABLE public.users ADD COLUMN os_code VARCHAR(10);
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name='os_name') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'os_name') THEN
           ALTER TABLE public.users ADD COLUMN os_name VARCHAR(50);
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name='os_version') THEN
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'os_version') THEN
           ALTER TABLE public.users ADD COLUMN os_version VARCHAR(20);
         END IF;
       END $$;
-    `);
+`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_users_uid ON users(uid)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_users_mobile ON users(mobile)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_users_last_seen ON users(last_seen_at)`);
@@ -637,31 +662,31 @@ async function ensureTablesExist() {
 
     // Create sessions table for V2 (no device_id - device info stored in users)
     await client.query(`
-      CREATE TABLE IF NOT EXISTS public.sessions (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        session_id VARCHAR(64) UNIQUE NOT NULL,
-        user_id VARCHAR(255),
-        channel VARCHAR(255),
-        session_start_at BIGINT NOT NULL,
-        session_end_at BIGINT,
-        duration_seconds INTEGER,
-        render_duration_ms INTEGER,
-        server_duration_ms INTEGER,
-        created_at TIMESTAMP DEFAULT NOW()
-      )
-    `);
+      CREATE TABLE IF NOT EXISTS public.sessions(
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_id VARCHAR(64) UNIQUE NOT NULL,
+  user_id VARCHAR(255),
+  channel VARCHAR(255),
+  session_start_at BIGINT NOT NULL,
+  session_end_at BIGINT,
+  duration_seconds INTEGER,
+  render_duration_ms INTEGER,
+  server_duration_ms INTEGER,
+  created_at TIMESTAMP DEFAULT NOW()
+)
+  `);
     // Migration: Change user_id from UUID to VARCHAR for existing tables
     await client.query(`
-      DO $$ 
-      BEGIN 
-        IF EXISTS (
-          SELECT 1 FROM information_schema.columns 
-          WHERE table_schema='public' AND table_name='sessions' AND column_name='user_id' AND data_type='uuid'
-        ) THEN
+      DO $$
+BEGIN 
+        IF EXISTS(
+  SELECT 1 FROM information_schema.columns 
+          WHERE table_schema = 'public' AND table_name = 'sessions' AND column_name = 'user_id' AND data_type = 'uuid'
+) THEN
           ALTER TABLE public.sessions ALTER COLUMN user_id TYPE VARCHAR(255);
         END IF;
       END $$;
-    `);
+`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_sessions_session_id ON sessions(session_id)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_sessions_start ON sessions(session_start_at)`);
@@ -709,44 +734,44 @@ async function processUserData(client, event) {
     const eventTimestamp = new Date(Number(event.ets));
 
     // Use fingerprint device_id as uid if available, otherwise fallback to event.uid
-    let uid = fingerprint?.device_id ? `fp_${fingerprint.device_id}` : event.uid;
+    let uid = fingerprint?.device_id ? `fp_${fingerprint.device_id} ` : event.uid;
 
     if (!uid || uid === 'guest') {
-      logger.debug(`Skipping user upsert - no fingerprint and uid is guest/empty`);
+      logger.debug(`Skipping user upsert - no fingerprint and uid is guest / empty`);
       return null;
     }
 
     // Debug logging to trace data extraction
-    logger.debug(`processUserData: uid=${uid}, fingerprint_id=${fingerprint?.device_id || 'null'}, browser=${fingerprint?.browser?.name || 'null'}, device=${fingerprint?.device?.name || 'null'}, os=${fingerprint?.os?.name || 'null'}`);
+    logger.debug(`processUserData: uid = ${uid}, fingerprint_id = ${fingerprint?.device_id || 'null'}, browser = ${fingerprint?.browser?.name || 'null'}, device = ${fingerprint?.device?.name || 'null'}, os = ${fingerprint?.os?.name || 'null'} `);
 
     const result = await client.query(`
-      INSERT INTO users (uid, mobile, username, email, role, farmer_id, 
-                         registered_location, device_location, agristack_location,
-                         fingerprint_id, browser_code, browser_name, browser_version,
-                         device_code, device_name, device_model,
-                         os_code, os_name, os_version,
-                         first_seen_at, last_seen_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
-      ON CONFLICT (uid) DO UPDATE SET
-        mobile = COALESCE(EXCLUDED.mobile, users.mobile),
-        username = COALESCE(EXCLUDED.username, users.username),
-        email = COALESCE(EXCLUDED.email, users.email),
-        role = COALESCE(EXCLUDED.role, users.role),
-        farmer_id = COALESCE(EXCLUDED.farmer_id, users.farmer_id),
-        registered_location = COALESCE(EXCLUDED.registered_location, users.registered_location),
-        device_location = COALESCE(EXCLUDED.device_location, users.device_location),
-        agristack_location = COALESCE(EXCLUDED.agristack_location, users.agristack_location),
-        fingerprint_id = COALESCE(EXCLUDED.fingerprint_id, users.fingerprint_id),
-        browser_code = COALESCE(EXCLUDED.browser_code, users.browser_code),
-        browser_name = COALESCE(EXCLUDED.browser_name, users.browser_name),
-        browser_version = COALESCE(EXCLUDED.browser_version, users.browser_version),
-        device_code = COALESCE(EXCLUDED.device_code, users.device_code),
-        device_name = COALESCE(EXCLUDED.device_name, users.device_name),
-        device_model = COALESCE(EXCLUDED.device_model, users.device_model),
-        os_code = COALESCE(EXCLUDED.os_code, users.os_code),
-        os_name = COALESCE(EXCLUDED.os_name, users.os_name),
-        os_version = COALESCE(EXCLUDED.os_version, users.os_version),
-        last_seen_at = EXCLUDED.last_seen_at
+      INSERT INTO users(uid, mobile, username, email, role, farmer_id,
+  registered_location, device_location, agristack_location,
+  fingerprint_id, browser_code, browser_name, browser_version,
+  device_code, device_name, device_model,
+  os_code, os_name, os_version,
+  first_seen_at, last_seen_at)
+VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+      ON CONFLICT(uid) DO UPDATE SET
+mobile = COALESCE(EXCLUDED.mobile, users.mobile),
+  username = COALESCE(EXCLUDED.username, users.username),
+  email = COALESCE(EXCLUDED.email, users.email),
+  role = COALESCE(EXCLUDED.role, users.role),
+  farmer_id = COALESCE(EXCLUDED.farmer_id, users.farmer_id),
+  registered_location = COALESCE(EXCLUDED.registered_location, users.registered_location),
+  device_location = COALESCE(EXCLUDED.device_location, users.device_location),
+  agristack_location = COALESCE(EXCLUDED.agristack_location, users.agristack_location),
+  fingerprint_id = COALESCE(EXCLUDED.fingerprint_id, users.fingerprint_id),
+  browser_code = COALESCE(EXCLUDED.browser_code, users.browser_code),
+  browser_name = COALESCE(EXCLUDED.browser_name, users.browser_name),
+  browser_version = COALESCE(EXCLUDED.browser_version, users.browser_version),
+  device_code = COALESCE(EXCLUDED.device_code, users.device_code),
+  device_name = COALESCE(EXCLUDED.device_name, users.device_name),
+  device_model = COALESCE(EXCLUDED.device_model, users.device_model),
+  os_code = COALESCE(EXCLUDED.os_code, users.os_code),
+  os_name = COALESCE(EXCLUDED.os_name, users.os_name),
+  os_version = COALESCE(EXCLUDED.os_version, users.os_version),
+  last_seen_at = EXCLUDED.last_seen_at
       RETURNING id
     `, [
       uid,
@@ -773,10 +798,10 @@ async function processUserData(client, event) {
     ]);
 
     const userId = result.rows[0]?.id;
-    logger.debug(`User upserted: uid=${uid}, id=${userId}, fingerprint=${fingerprint?.device_id || 'none'}`);
+    logger.debug(`User upserted: uid = ${uid}, id = ${userId}, fingerprint = ${fingerprint?.device_id || 'none'} `);
     return userId;
   } catch (err) {
-    logger.error(`Error processing user data: ${err.message}`);
+    logger.error(`Error processing user data: ${err.message} `);
     return null;
   }
 }
@@ -802,18 +827,18 @@ async function processSessionStart(client, event, uid) {
     const sessionStartAt = fingerprint?.session?.session_start_at || event.ets;
 
     const result = await client.query(`
-      INSERT INTO sessions (session_id, user_id, channel, session_start_at)
-      VALUES ($1, $2, $3, $4)
-      ON CONFLICT (session_id) DO UPDATE SET
-        user_id = COALESCE(EXCLUDED.user_id, sessions.user_id)
+      INSERT INTO sessions(session_id, user_id, channel, session_start_at)
+VALUES($1, $2, $3, $4)
+      ON CONFLICT(session_id) DO UPDATE SET
+user_id = COALESCE(EXCLUDED.user_id, sessions.user_id)
       RETURNING id
     `, [sid, uid, event.channel, sessionStartAt]);
 
     const sessionId = result.rows[0]?.id;
-    logger.debug(`Session started: sid=${sid}, id=${sessionId}, uid=${uid}`);
+    logger.debug(`Session started: sid = ${sid}, id = ${sessionId}, uid = ${uid} `);
     return sessionId;
   } catch (err) {
-    logger.error(`Error processing session start: ${err.message}`);
+    logger.error(`Error processing session start: ${err.message} `);
     return null;
   }
 }
@@ -847,16 +872,16 @@ async function processSessionEnd(client, event) {
 
     await client.query(`
       UPDATE sessions SET
-        session_end_at = $1,
-        duration_seconds = $2,
-        render_duration_ms = $3,
-        server_duration_ms = $4
+session_end_at = $1,
+  duration_seconds = $2,
+  render_duration_ms = $3,
+  server_duration_ms = $4
       WHERE session_id = $5
-    `, [sessionEndAt, durationSeconds, renderDurationMs, serverDurationMs, sid]);
+  `, [sessionEndAt, durationSeconds, renderDurationMs, serverDurationMs, sid]);
 
-    logger.debug(`Session ended: sid=${sid}, duration=${durationSeconds}s`);
+    logger.debug(`Session ended: sid = ${sid}, duration = ${durationSeconds} s`);
   } catch (err) {
-    logger.error(`Error processing session end: ${err.message}`);
+    logger.error(`Error processing session end: ${err.message} `);
   }
 }
 
@@ -875,7 +900,7 @@ async function getSessionIdBySid(client, sid) {
     );
     return result.rows[0]?.id || null;
   } catch (err) {
-    logger.error(`Error getting session id: ${err.message}`);
+    logger.error(`Error getting session id: ${err.message} `);
     return null;
   }
 }
@@ -883,23 +908,23 @@ async function getSessionIdBySid(client, sid) {
 // Parse telemetry message JSON
 function parseTelemetryMessage(message, batchId = '', logIndex = 0) {
   try {
-    logger.debug(`[${batchId}] [Log ${logIndex}] Parsing telemetry message (length: ${message?.length || 0} chars)`);
+    logger.debug(`[${batchId}][Log ${logIndex}] Parsing telemetry message(length: ${message?.length || 0} chars)`);
     // Parse the message string which is a JSON string
     const parsedMessage = JSON.parse(message);
     // Return the events array from the parsed message
     const events = parsedMessage.events || [];
-    logger.debug(`[${batchId}] [Log ${logIndex}] Successfully parsed message, found ${events.length} events`);
+    logger.debug(`[${batchId}][Log ${logIndex}] Successfully parsed message, found ${events.length} events`);
     return events;
   } catch (err) {
     const messagePreview = message?.substring(0, 100) || 'empty';
-    logger.error(`[${batchId}] [Log ${logIndex}] Error parsing telemetry message: ${err.message}`);
-    logger.error(`[${batchId}] [Log ${logIndex}] Message preview: ${messagePreview}...`);
+    logger.error(`[${batchId}][Log ${logIndex}] Error parsing telemetry message: ${err.message} `);
+    logger.error(`[${batchId}][Log ${logIndex}] Message preview: ${messagePreview}...`);
     return [];
   }
 }
 
 // Process telemetry logs
-async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
+async function processTelemetryLogs(batchId = `batch_${Date.now()} `) {
   logger.info(`[${batchId}] Step 1: Acquiring database connection...`);
   const client = await pool.connect();
   logger.info(`[${batchId}] Step 1: Database connection acquired`);
@@ -915,17 +940,17 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
     logger.info(`[${batchId}] Step 2: Transaction started`);
 
     // Get unprocessed logs
-    logger.info(`[${batchId}] Step 3: Fetching unprocessed logs (BATCH_SIZE: ${BATCH_SIZE})...`);
+    logger.info(`[${batchId}] Step 3: Fetching unprocessed logs(BATCH_SIZE: ${BATCH_SIZE})...`);
     const queryStartTime = Date.now();
     const result = await client.query(
-      `SELECT id, level, message, meta, cast(to_char(("timestamp")::TIMESTAMP,'yyyymmddhhmiss') as BigInt) as timestamp, sync_status FROM winston_logs 
+      `SELECT id, level, message, meta, cast(to_char(("timestamp"):: TIMESTAMP, 'yyyymmddhhmiss') as BigInt) as timestamp, sync_status FROM winston_logs 
        WHERE sync_status = 0 
        ORDER BY "timestamp" ASC 
        LIMIT $1`,
       [BATCH_SIZE]
     );
     const queryDuration = Date.now() - queryStartTime;
-    logger.info(`[${batchId}] Step 3: Query completed in ${queryDuration}ms, found ${result.rows.length} logs`);
+    logger.info(`[${batchId}] Step 3: Query completed in ${queryDuration} ms, found ${result.rows.length} logs`);
 
     if (result.rows.length === 0) {
       logger.info(`[${batchId}] Step 4: No new telemetry logs to process - committing empty transaction`);
@@ -940,13 +965,13 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
     for (let logIndex = 0; logIndex < result.rows.length; logIndex++) {
       const log = result.rows[logIndex];
       const logStartTime = Date.now();
-      logger.info(`[${batchId}] [Log ${logIndex + 1}/${result.rows.length}] Processing log (timestamp: ${log.timestamp}, level: ${log.level})`);
+      logger.info(`[${batchId}][Log ${logIndex + 1}/${result.rows.length}] Processing log(timestamp: ${log.timestamp}, level: ${log.level})`);
 
       const events = parseTelemetryMessage(log.message, batchId, logIndex + 1);
-      logger.info(`[${batchId}] [Log ${logIndex + 1}] Parsed ${events.length} events from message`);
+      logger.info(`[${batchId}][Log ${logIndex + 1}] Parsed ${events.length} events from message`);
 
       if (events.length === 0) {
-        logger.warn(`[${batchId}] [Log ${logIndex + 1}] No events found in message - skipping to sync status update`);
+        logger.warn(`[${batchId}][Log ${logIndex + 1}] No events found in message - skipping to sync status update`);
       }
 
       for (let eventIndex = 0; eventIndex < events.length; eventIndex++) {
@@ -954,7 +979,7 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
         const eventType = event.eid;
         const eventUid = event.uid || 'unknown';
         const eventMid = event.mid || 'unknown';
-        logger.debug(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}/${events.length}] Processing event type: ${eventType}, uid: ${eventUid}, mid: ${eventMid}`);
+        logger.debug(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}/${events.length}] Processing event type: ${eventType}, uid: ${eventUid}, mid: ${eventMid} `);
 
         let eventProcessed = false;
         let matchedProcessor = null;
@@ -966,7 +991,7 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
             processor["fieldVerification"]
           );
 
-          logger.debug(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] Checking processor '${key}': eventType match=${processor["eventType"] === eventType}, verified=${verified !== undefined}`);
+          logger.debug(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}] Checking processor '${key}': eventType match = ${processor["eventType"] === eventType}, verified = ${verified !== undefined} `);
 
           if (
             processor["eventType"] === eventType &&
@@ -974,13 +999,13 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
             !eventProcessed
           ) {
             matchedProcessor = key;
-            logger.info(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] mid: ${eventMid} - Matched processor '${key}' for event type '${eventType}'`);
+            logger.info(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}]mid: ${eventMid} - Matched processor '${key}' for event type '${eventType}'`);
 
             const processorStartTime = Date.now();
             await processor["process"](client, event);
             const processorDuration = Date.now() - processorStartTime;
 
-            logger.info(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] mid: ${eventMid} - Processor '${key}' completed in ${processorDuration}ms`);
+            logger.info(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}]mid: ${eventMid} - Processor '${key}' completed in ${processorDuration} ms`);
             eventProcessed = true;
             totalEventsProcessed++;
             break;
@@ -992,30 +1017,30 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
           eventType !== "OE_START" &&
           eventProcessed === false
         ) {
-          logger.warn(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] mid: ${eventMid} - No processor matched for event type: ${eventType} - sending to dead letter queue`);
-          logger.debug(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] mid: ${eventMid} - Dead letter event uid: ${eventUid}, channel: ${event.channel || 'unknown'}`);
+          logger.warn(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}]mid: ${eventMid} - No processor matched for event type: ${eventType} - sending to dead letter queue`);
+          logger.debug(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}]mid: ${eventMid} - Dead letter event uid: ${eventUid}, channel: ${event.channel || 'unknown'} `);
 
           await client.query(
-            `Insert into dead_letter_logs(level, message, meta, event_name) values ($1, $2, $3, $4)`,
+            `Insert into dead_letter_logs(level, message, meta, event_name) values($1, $2, $3, $4)`,
             [log.level, JSON.stringify(event), log.meta, eventType]
           );
           deadLetterCount++;
-          logger.info(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] Event inserted into dead_letter_logs`);
+          logger.info(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}] Event inserted into dead_letter_logs`);
         } else if (eventType === "OE_START") {
           // V2: Process OE_START for user/session creation (device metadata stored in users)
-          logger.info(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] Processing OE_START for V2 (user/session)`);
+          logger.info(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}] Processing OE_START for V2(user / session)`);
           try {
             const fingerprint = event.edata?.eks?.fingerprint_details;
             const uid = fingerprint?.device_id ? `fp_${fingerprint.device_id}` : event.uid;
             await processUserData(client, event);
             await processSessionStart(client, event, uid);
-            logger.info(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] V2 OE_START processed: uid=${uid}`);
+            logger.info(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}] V2 OE_START processed: uid = ${uid} `);
           } catch (v2Err) {
-            logger.error(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] V2 OE_START error: ${v2Err.message}`);
+            logger.error(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}] V2 OE_START error: ${v2Err.message} `);
           }
         } else if (eventType === "OE_END") {
           // V2: Process OE_END to update session with end time and performance
-          logger.info(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] Processing OE_END for V2 (session end)`);
+          logger.info(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}] Processing OE_END for V2(session end)`);
           try {
             await processSessionEnd(client, event);
             // Update user's last_seen_at with fingerprint-based uid
@@ -1024,17 +1049,17 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
             if (uid && uid !== 'guest') {
               await client.query(`
                 UPDATE users SET last_seen_at = NOW() WHERE uid = $1
-              `, [uid]);
+  `, [uid]);
             }
-            logger.info(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] V2 OE_END processed`);
+            logger.info(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}] V2 OE_END processed`);
           } catch (v2Err) {
-            logger.error(`[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] V2 OE_END error: ${v2Err.message}`);
+            logger.error(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}] V2 OE_END error: ${v2Err.message} `);
           }
         }
       }
 
       // Update sync status for processed log
-      logger.debug(`[${batchId}] [Log ${logIndex + 1}] Updating sync_status to 1 for processed log...`);
+      logger.debug(`[${batchId}][Log ${logIndex + 1}] Updating sync_status to 1 for processed log...`);
       await client.query(
         `UPDATE winston_logs SET sync_status = 1 WHERE id = $1`,
         [log.id]
@@ -1042,7 +1067,7 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
 
       const logDuration = Date.now() - logStartTime;
       processedCount++;
-      logger.info(`[${batchId}] [Log ${logIndex + 1}] Log processing completed in ${logDuration}ms, sync_status updated`);
+      logger.info(`[${batchId}][Log ${logIndex + 1}] Log processing completed in ${logDuration} ms, sync_status updated`);
     }
 
     // Commit transaction
@@ -1051,18 +1076,18 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
     logger.info(`[${batchId}] Step 5: Transaction committed successfully`);
 
     logger.info(`[${batchId}] ========== PROCESSING SUMMARY ==========`);
-    logger.info(`[${batchId}] Logs processed: ${processedCount}`);
-    logger.info(`[${batchId}] Total events processed: ${totalEventsProcessed}`);
-    logger.info(`[${batchId}] Dead letter events: ${deadLetterCount}`);
-    logger.info(`[${batchId}] ==========================================`);
+    logger.info(`[${batchId}] Logs processed: ${processedCount} `);
+    logger.info(`[${batchId}] Total events processed: ${totalEventsProcessed} `);
+    logger.info(`[${batchId}] Dead letter events: ${deadLetterCount} `);
+    logger.info(`[${batchId}] ========================================== `);
 
     return { processed: result.rows.length, status: "success", eventsProcessed: totalEventsProcessed, deadLetterCount };
   } catch (err) {
     logger.error(`[${batchId}] Step ERROR: Rolling back transaction due to error...`);
     await client.query("ROLLBACK");
     logger.error(`[${batchId}] Step ERROR: Transaction rolled back`);
-    logger.error(`[${batchId}] Error details: ${err.message}`);
-    logger.error(`[${batchId}] Error stack: ${err.stack}`);
+    logger.error(`[${batchId}] Error details: ${err.message} `);
+    logger.error(`[${batchId}] Error stack: ${err.stack} `);
     logger.error(`[${batchId}] Processed before error: ${processedCount} logs, ${totalEventsProcessed} events`);
     return { processed: 0, status: "error", error: err.message };
   } finally {
@@ -1092,7 +1117,7 @@ async function processQuestionData(client, event) {
 
     // Insert data into questions table
     // await client.query(
-    //   `INSERT INTO questions (
+    //   `INSERT INTO questions(
     //     uid, sid, group_details, channel, ets, 
     //     question_text, question_source, answer_text, answer, is_new
     //   ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
@@ -1232,73 +1257,6 @@ cron.schedule(CRON_SCHEDULE, async () => {
 });
 
 // ============================================
-// V2: Materialized Views Refresh Cron
-// Refresh analytics views every 15 minutes
-// ============================================
-const V2_MV_REFRESH_SCHEDULE = process.env.V2_MV_REFRESH_SCHEDULE || "*/15 * * * *";
-let isRefreshingV2Views = false;
-
-cron.schedule(V2_MV_REFRESH_SCHEDULE, async () => {
-  if (isRefreshingV2Views) {
-    logger.warn('[V2 MV] Skipping refresh - previous refresh still in progress');
-    return;
-  }
-
-  isRefreshingV2Views = true;
-  const refreshStartTime = Date.now();
-  logger.info(`[V2 MV] Starting materialized views refresh (${V2_MV_REFRESH_SCHEDULE})`);
-
-  const client = await pool.connect();
-  try {
-    // Check if views exist before refreshing
-    const viewsExist = await client.query(`
-      SELECT COUNT(*) as cnt FROM pg_matviews 
-      WHERE matviewname IN ('mv_total_devices', 'mv_browser_density', 'mv_device_density', 
-                            'mv_os_density', 'mv_session_duration', 'mv_active_users', 
-                            'mv_performance_metrics')
-    `);
-
-    if (parseInt(viewsExist.rows[0].cnt) === 0) {
-      logger.info('[V2 MV] No V2 materialized views found - skipping refresh');
-      return;
-    }
-
-    // Refresh each view
-    const views = [
-      'mv_total_devices',
-      'mv_browser_density',
-      'mv_device_density',
-      'mv_os_density',
-      'mv_session_duration',
-      'mv_active_users',
-      'mv_performance_metrics'
-    ];
-
-    for (const view of views) {
-      try {
-        await client.query(`REFRESH MATERIALIZED VIEW CONCURRENTLY ${view}`);
-        logger.debug(`[V2 MV] Refreshed ${view}`);
-      } catch (viewErr) {
-        if (viewErr.message.includes('does not exist')) {
-          logger.debug(`[V2 MV] View ${view} does not exist yet`);
-        } else if (viewErr.message.includes('cannot refresh')) {
-          await client.query(`REFRESH MATERIALIZED VIEW ${view}`);
-          logger.debug(`[V2 MV] Refreshed ${view} (non-concurrent)`);
-        } else {
-          logger.warn(`[V2 MV] Failed to refresh ${view}: ${viewErr.message}`);
-        }
-      }
-    }
-
-    const duration = Date.now() - refreshStartTime;
-    logger.info(`[V2 MV] Materialized views refresh completed in ${duration}ms`);
-  } catch (err) {
-    logger.error(`[V2 MV] Refresh failed: ${err.message}`);
-  } finally {
-    client.release();
-    isRefreshingV2Views = false;
-  }
-});
 
 // Run the existing backfillIsNew() every 30 minutes (minimal)
 // cron.schedule(IS_NEW_BACKFILL_SCHEDULE, async () => {
@@ -1535,34 +1493,141 @@ async function refreshMaterializedViews() {
   try {
     logger.info("[MV_REFRESH] Starting materialized views refresh...");
 
-    // Check if materialized views exist before attempting refresh
-    const viewCheck = await client.query(`
-      SELECT matviewname FROM pg_matviews 
-      WHERE schemaname = 'public' 
-      AND matviewname IN ('mv_user_first_activity', 'mv_daily_new_returning_users')
-    `);
+    // Unified MV Definitions
+    const mvDefinitions = [
+      // Legacy MVs
+      {
+        name: 'mv_user_first_activity',
+        query: `
+          CREATE MATERIALIZED VIEW IF NOT EXISTS mv_user_first_activity AS
+          SELECT 
+            user_id, 
+            MIN(session_start_at) as first_seen_at
+          FROM sessions
+          GROUP BY user_id;
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_user_first_activity_user_id ON mv_user_first_activity(user_id);
+        `
+      },
+      {
+        name: 'mv_daily_new_returning_users',
+        query: `
+          CREATE MATERIALIZED VIEW IF NOT EXISTS mv_daily_new_returning_users AS
+          SELECT
+            TO_TIMESTAMP(s.session_start_at / 1000)::DATE AS activity_date,
+            COUNT(DISTINCT CASE WHEN s.session_start_at = f.first_seen_at THEN s.user_id END) as new_users,
+            COUNT(DISTINCT CASE WHEN s.session_start_at > f.first_seen_at THEN s.user_id END) as returning_users
+          FROM sessions s
+          JOIN mv_user_first_activity f ON s.user_id = f.user_id
+          GROUP BY 1;
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_daily_new_returning_users_date ON mv_daily_new_returning_users(activity_date);
+        `
+      },
+      // V2 MVs
+      {
+        name: 'mv_total_devices',
+        query: `
+          CREATE MATERIALIZED VIEW IF NOT EXISTS mv_total_devices AS
+          SELECT COUNT(DISTINCT fingerprint_id) as total_devices
+          FROM users;
+        `
+      },
+      {
+        name: 'mv_browser_density',
+        query: `
+          CREATE MATERIALIZED VIEW IF NOT EXISTS mv_browser_density AS
+          SELECT browser_name, COUNT(*) as count
+          FROM users
+          WHERE browser_name IS NOT NULL
+          GROUP BY browser_name;
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_browser_density_name ON mv_browser_density(browser_name);
+        `
+      },
+      {
+        name: 'mv_device_density',
+        query: `
+          CREATE MATERIALIZED VIEW IF NOT EXISTS mv_device_density AS
+          SELECT device_name, COUNT(*) as count
+          FROM users
+          WHERE device_name IS NOT NULL
+          GROUP BY device_name;
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_device_density_name ON mv_device_density(device_name);
+        `
+      },
+      {
+        name: 'mv_os_density',
+        query: `
+          CREATE MATERIALIZED VIEW IF NOT EXISTS mv_os_density AS
+          SELECT os_name, COUNT(*) as count
+          FROM users
+          WHERE os_name IS NOT NULL
+          GROUP BY os_name;
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_os_density_name ON mv_os_density(os_name);
+        `
+      },
+      {
+        name: 'mv_session_duration',
+        query: `
+          CREATE MATERIALIZED VIEW IF NOT EXISTS mv_session_duration AS
+          SELECT 
+              COUNT(*) as total_sessions,
+              AVG(duration_seconds) as avg_duration,
+              MIN(duration_seconds) as min_duration,
+              MAX(duration_seconds) as max_duration
+          FROM sessions
+          WHERE duration_seconds IS NOT NULL;
+        `
+      },
+      {
+        name: 'mv_active_users',
+        query: `
+          CREATE MATERIALIZED VIEW IF NOT EXISTS mv_active_users AS
+          SELECT 
+              TO_TIMESTAMP(session_start_at / 1000)::DATE as activity_date,
+              COUNT(DISTINCT user_id) as active_users
+          FROM sessions
+          GROUP BY 1;
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_active_users_date ON mv_active_users(activity_date);
+        `
+      },
+      {
+        name: 'mv_performance_metrics',
+        query: `
+          CREATE MATERIALIZED VIEW IF NOT EXISTS mv_performance_metrics AS
+          SELECT 
+              AVG(render_duration_ms) as avg_render_ms,
+              AVG(server_duration_ms) as avg_server_ms,
+              MAX(render_duration_ms) as max_render_ms,
+              MAX(server_duration_ms) as max_server_ms
+          FROM sessions
+          WHERE render_duration_ms IS NOT NULL OR server_duration_ms IS NOT NULL;
+        `
+      }
+    ];
 
-    const existingViews = viewCheck.rows.map(r => r.matviewname);
-
-    if (existingViews.length === 0) {
-      logger.warn("[MV_REFRESH] No materialized views found. Please run the CREATE MATERIALIZED VIEW statements first.");
-      return { status: "skipped", reason: "views_not_found" };
+    // Ensure all MVs exist
+    logger.info('[MV_REFRESH] Verifying existence of Materialized Views...');
+    for (const mv of mvDefinitions) {
+      try {
+        await client.query(mv.query);
+      } catch (err) {
+        logger.error(`[MV_REFRESH] Failed to create/verify MV ${mv.name}: ${err.message}`);
+      }
     }
 
-    // Refresh mv_user_first_activity first (foundation view)
-    if (existingViews.includes('mv_user_first_activity')) {
-      logger.info("[MV_REFRESH] Refreshing mv_user_first_activity...");
-      const mv1Start = Date.now();
-      await client.query("REFRESH MATERIALIZED VIEW CONCURRENTLY mv_user_first_activity");
-      logger.info(`[MV_REFRESH] mv_user_first_activity refreshed in ${Date.now() - mv1Start}ms`);
-    }
-
-    // Refresh mv_daily_new_returning_users (depends on first view)
-    if (existingViews.includes('mv_daily_new_returning_users')) {
-      logger.info("[MV_REFRESH] Refreshing mv_daily_new_returning_users...");
-      const mv2Start = Date.now();
-      await client.query("REFRESH MATERIALIZED VIEW CONCURRENTLY mv_daily_new_returning_users");
-      logger.info(`[MV_REFRESH] mv_daily_new_returning_users refreshed in ${Date.now() - mv2Start}ms`);
+    // Refresh all views
+    for (const mv of mvDefinitions) {
+      const view = mv.name;
+      try {
+        await client.query(`REFRESH MATERIALIZED VIEW CONCURRENTLY ${view}`);
+        logger.debug(`[MV_REFRESH] Refreshed ${view}`);
+      } catch (viewErr) {
+        if (viewErr.message.includes('cannot refresh')) {
+          await client.query(`REFRESH MATERIALIZED VIEW ${view}`);
+          logger.debug(`[MV_REFRESH] Refreshed ${view} (non-concurrent)`);
+        } else {
+          logger.warn(`[MV_REFRESH] Failed to refresh ${view}: ${viewErr.message}`);
+        }
+      }
     }
 
     const totalDuration = Date.now() - startTime;
@@ -1571,7 +1636,7 @@ async function refreshMaterializedViews() {
     return {
       status: "success",
       duration: totalDuration,
-      refreshedViews: existingViews
+      refreshedViews: mvDefinitions.map(d => d.name)
     };
 
   } catch (err) {

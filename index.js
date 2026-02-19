@@ -384,6 +384,98 @@ async function ensureTablesExist() {
       END $$;
     `);
 
+    // Create tts_details table if not exists
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.tts_details(
+      id UUID DEFAULT gen_random_uuid(),
+      unique_id VARCHAR,
+      uid VARCHAR,
+      sid VARCHAR,
+      channel VARCHAR,
+      ets BIGINT,
+      qid VARCHAR,
+      apiType VARCHAR,
+      apiService VARCHAR,
+      success BOOLEAN,
+      latencyMs NUMERIC,
+      statusCode INTEGER,
+      errorCode VARCHAR,
+      errorMessage TEXT,
+      language VARCHAR,
+      sessionId VARCHAR,
+      text TEXT,
+      mobile VARCHAR,
+      farmer_id VARCHAR,
+      fingerprint_id VARCHAR(64),
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+      `);
+
+    // Add missing columns to tts_details table if they don't exist
+    await client.query(`
+      DO $$
+    BEGIN 
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'tts_details' AND column_name = 'unique_id') THEN
+          ALTER TABLE public.tts_details ADD COLUMN unique_id VARCHAR;
+        END IF;
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'tts_details' AND column_name = 'mobile') THEN
+          ALTER TABLE public.tts_details ADD COLUMN mobile VARCHAR;
+        END IF;
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'tts_details' AND column_name = 'farmer_id') THEN
+          ALTER TABLE public.tts_details ADD COLUMN farmer_id VARCHAR;
+        END IF;
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'tts_details' AND column_name = 'fingerprint_id') THEN
+          ALTER TABLE public.tts_details ADD COLUMN fingerprint_id VARCHAR(64);
+        END IF;
+      END $$;
+    `);
+
+    // Create asr_details table if not exists
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.asr_details(
+      id UUID DEFAULT gen_random_uuid(),
+      unique_id VARCHAR,
+      uid VARCHAR,
+      sid VARCHAR,
+      channel VARCHAR,
+      ets BIGINT,
+      qid VARCHAR,
+      apiType VARCHAR,
+      apiService VARCHAR,
+      success BOOLEAN,
+      latencyMs NUMERIC,
+      statusCode INTEGER,
+      errorCode VARCHAR,
+      errorMessage TEXT,
+      language VARCHAR,
+      sessionId VARCHAR,
+      text TEXT,
+      mobile VARCHAR,
+      farmer_id VARCHAR,
+      fingerprint_id VARCHAR(64),
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+      `);
+
+    // Add missing columns to asr_details table if they don't exist
+    await client.query(`
+      DO $$
+    BEGIN 
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'asr_details' AND column_name = 'unique_id') THEN
+          ALTER TABLE public.asr_details ADD COLUMN unique_id VARCHAR;
+        END IF;
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'asr_details' AND column_name = 'mobile') THEN
+          ALTER TABLE public.asr_details ADD COLUMN mobile VARCHAR;
+        END IF;
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'asr_details' AND column_name = 'farmer_id') THEN
+          ALTER TABLE public.asr_details ADD COLUMN farmer_id VARCHAR;
+        END IF;
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'asr_details' AND column_name = 'fingerprint_id') THEN
+          ALTER TABLE public.asr_details ADD COLUMN fingerprint_id VARCHAR(64);
+        END IF;
+      END $$;
+    `);
+
     // Create event_processors table if not exists
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.event_processors(
@@ -577,6 +669,118 @@ event_type = 'OE_ITEM_RESPONSE',
 field_verification = 'edata.eks.target.feedbackDetails',
   updated_at = NOW()
       WHERE table_name = 'feedback';
+`);
+
+    await client.query(`
+      INSERT INTO public.event_processors(event_type, table_name, field_mappings, field_verification)
+VALUES
+  ('OE_ITEM_RESPONSE', 'tts_details', '{
+          "unique_id": "edata.eks.target.unique_id",
+    "uid": "uid",
+    "sid": "sid",
+    "channel": "channel",
+    "ets": "ets",
+    "qid": "edata.eks.qid",
+    "apiType": "edata.eks.target.ttsResponseDetails.apiType",
+    "apiService": "edata.eks.target.ttsResponseDetails.apiService",
+    "success": "edata.eks.target.ttsResponseDetails.success",
+    "latencyMs": "edata.eks.target.ttsResponseDetails.latencyMs",
+    "statusCode": "edata.eks.target.ttsResponseDetails.statusCode",
+    "errorCode": "edata.eks.target.ttsResponseDetails.errorCode",
+    "errorMessage": "edata.eks.target.ttsResponseDetails.errorMessage",
+    "language": "edata.eks.target.ttsResponseDetails.language",
+    "sessionId": "edata.eks.target.ttsResponseDetails.sessionId",
+    "text": "edata.eks.target.ttsResponseDetails.text",
+    "mobile": "edata.eks.target.mobile",
+    "farmer_id": "edata.eks.target.farmer_id",
+    "fingerprint_id": "edata.eks.fingerprint_details.device_id"
+        }','edata.eks.target.ttsResponseDetails')
+      ON CONFLICT DO NOTHING;
+`);
+    await client.query(`
+      UPDATE public.event_processors
+SET
+event_type = 'OE_ITEM_RESPONSE',
+  field_mappings = '{
+"unique_id": "edata.eks.target.unique_id",
+  "uid": "uid",
+    "sid": "sid",
+      "channel": "channel",
+        "ets": "ets",
+          "qid": "edata.eks.qid",
+            "apiType": "edata.eks.target.ttsResponseDetails.apiType",
+              "apiService": "edata.eks.target.ttsResponseDetails.apiService",
+                "success": "edata.eks.target.ttsResponseDetails.success",
+                  "latencyMs": "edata.eks.target.ttsResponseDetails.latencyMs",
+                    "statusCode": "edata.eks.target.ttsResponseDetails.statusCode",
+                      "errorCode": "edata.eks.target.ttsResponseDetails.errorCode",
+                        "errorMessage": "edata.eks.target.ttsResponseDetails.errorMessage",
+                          "language": "edata.eks.target.ttsResponseDetails.language",
+                            "sessionId": "edata.eks.target.ttsResponseDetails.sessionId",
+                              "text": "edata.eks.target.ttsResponseDetails.text",
+                                "mobile": "edata.eks.target.mobile",
+                                  "farmer_id": "edata.eks.target.farmer_id",
+                                    "fingerprint_id": "edata.eks.fingerprint_details.device_id"
+        }',
+field_verification = 'edata.eks.target.ttsResponseDetails',
+  updated_at = NOW()
+      WHERE table_name = 'tts_details';
+`);
+
+    await client.query(`
+      INSERT INTO public.event_processors(event_type, table_name, field_mappings, field_verification)
+VALUES
+  ('OE_ITEM_RESPONSE', 'asr_details', '{
+          "unique_id": "edata.eks.target.unique_id",
+    "uid": "uid",
+    "sid": "sid",
+    "channel": "channel",
+    "ets": "ets",
+    "qid": "edata.eks.qid",
+    "apiType": "edata.eks.target.asrResponseDetails.apiType",
+    "apiService": "edata.eks.target.asrResponseDetails.apiService",
+    "success": "edata.eks.target.asrResponseDetails.success",
+    "latencyMs": "edata.eks.target.asrResponseDetails.latencyMs",
+    "statusCode": "edata.eks.target.asrResponseDetails.statusCode",
+    "errorCode": "edata.eks.target.asrResponseDetails.errorCode",
+    "errorMessage": "edata.eks.target.asrResponseDetails.errorMessage",
+    "language": "edata.eks.target.asrResponseDetails.language",
+    "sessionId": "edata.eks.target.asrResponseDetails.sessionId",
+    "text": "edata.eks.target.asrResponseDetails.text",
+    "mobile": "edata.eks.target.mobile",
+    "farmer_id": "edata.eks.target.farmer_id",
+    "fingerprint_id": "edata.eks.fingerprint_details.device_id"
+        }','edata.eks.target.asrResponseDetails')
+      ON CONFLICT DO NOTHING;
+`);
+    await client.query(`
+      UPDATE public.event_processors
+SET
+event_type = 'OE_ITEM_RESPONSE',
+  field_mappings = '{
+"unique_id": "edata.eks.target.unique_id",
+  "uid": "uid",
+    "sid": "sid",
+      "channel": "channel",
+        "ets": "ets",
+          "qid": "edata.eks.qid",
+            "apiType": "edata.eks.target.asrResponseDetails.apiType",
+              "apiService": "edata.eks.target.asrResponseDetails.apiService",
+                "success": "edata.eks.target.asrResponseDetails.success",
+                  "latencyMs": "edata.eks.target.asrResponseDetails.latencyMs",
+                    "statusCode": "edata.eks.target.asrResponseDetails.statusCode",
+                      "errorCode": "edata.eks.target.asrResponseDetails.errorCode",
+                        "errorMessage": "edata.eks.target.asrResponseDetails.errorMessage",
+                          "language": "edata.eks.target.asrResponseDetails.language",
+                            "sessionId": "edata.eks.target.asrResponseDetails.sessionId",
+                              "text": "edata.eks.target.asrResponseDetails.text",
+                                "mobile": "edata.eks.target.mobile",
+                                  "farmer_id": "edata.eks.target.farmer_id",
+                                    "fingerprint_id": "edata.eks.fingerprint_details.device_id"
+        }',
+field_verification = 'edata.eks.target.asrResponseDetails',
+  updated_at = NOW()
+      WHERE table_name = 'asr_details';
 `);
 
 
@@ -980,17 +1184,44 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()} `) {
         const eventMid = event.mid || 'unknown';
         logger.debug(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}/${events.length}] Processing event type: ${eventType}, uid: ${eventUid}, mid: ${eventMid} `);
 
+        // Check if this is a TTS or ASR event
+        const hasTtsResponse = getNestedValue(event, 'edata.eks.target.ttsResponseDetails');
+        const hasAsrResponse = getNestedValue(event, 'edata.eks.target.asrResponseDetails');
+
         let eventProcessed = false;
         let matchedProcessor = null;
 
+        // PRIORITY CHECK: Process ASR/TTS events first (they have higher priority)
+        // This prevents them from being consumed by the questions processor
+        const priorityProcessors = [];
+        const regularProcessors = [];
+
+        // Separate priority processors from regular ones
         for (const key in eventProcessors) {
           const processor = eventProcessors[key];
+          if (processor["tableName"] === 'tts_details' || processor["tableName"] === 'asr_details') {
+            priorityProcessors.push({ key, processor });
+          } else {
+            regularProcessors.push({ key, processor });
+          }
+        }
+
+        // Combine: priority processors first, then regular ones
+        const orderedProcessors = [...priorityProcessors, ...regularProcessors];
+
+        for (const { key, processor } of orderedProcessors) {
           const verified = getNestedValue(
             event,
             processor["fieldVerification"]
           );
 
           logger.debug(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}] Checking processor '${key}': eventType match = ${processor["eventType"] === eventType}, verified = ${verified !== undefined} `);
+
+          // CRITICAL: Skip questions processor if ASR/TTS response exists
+          // This prevents ASR/TTS events from being consumed by questions processor
+          if (processor["tableName"] === 'questions' && (hasAsrResponse || hasTtsResponse)) {
+            continue;
+          }
 
           if (
             processor["eventType"] === eventType &&
@@ -1727,6 +1958,12 @@ async function startServer() {
 
     // Load configured event processors
     await loadEventProcessors.loadFromDatabase(pool);
+
+    // Log loaded processors for debugging
+    logger.info(`Loaded ${eventProcessors.length} event processors from database`);
+    eventProcessors.forEach((proc, index) => {
+      logger.info(`  Processor ${index}: table="${proc.tableName}", eventType="${proc.eventType}", fieldVerification="${proc.fieldVerification}"`);
+    });
 
     // Start Express server
     const server = app.listen(PORT, () => {

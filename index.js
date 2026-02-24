@@ -1304,6 +1304,17 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()} `) {
             verified !== undefined &&
             !eventProcessed
           ) {
+            // Skip the 'questions' processor for events that have TTS or ASR data
+            // to prevent TTS/ASR events from being duplicated into the questions table
+            if (processor["tableName"] === "questions") {
+              const hasTtsData = getNestedValue(event, "edata.eks.target.ttsResponseDetails");
+              const hasAsrData = getNestedValue(event, "edata.eks.target.asrResponseDetails");
+              if (hasTtsData !== undefined || hasAsrData !== undefined) {
+                logger.debug(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}] Skipping 'questions' processor for TTS/ASR event`);
+                continue;
+              }
+            }
+
             matchedProcessor = key;
             logger.info(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}]mid: ${eventMid} - Matched processor '${key}' for event type '${eventType}'`);
 

@@ -476,6 +476,49 @@ async function ensureTablesExist() {
       END $$;
     `);
 
+    // Create network_api_table for beckn network API telemetry
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.network_api_table(
+      id SERIAL PRIMARY KEY,
+      uid VARCHAR,
+      sid VARCHAR,
+      channel VARCHAR,
+      ets BIGINT,
+      input JSONB,
+      output JSONB,
+      success TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+      `);
+
+    // Add missing columns to network_api_table if they don't exist
+    await client.query(`
+      DO $$
+    BEGIN 
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'network_api_table' AND column_name = 'uid') THEN
+          ALTER TABLE public.network_api_table ADD COLUMN uid VARCHAR;
+        END IF;
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'network_api_table' AND column_name = 'sid') THEN
+          ALTER TABLE public.network_api_table ADD COLUMN sid VARCHAR;
+        END IF;
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'network_api_table' AND column_name = 'channel') THEN
+          ALTER TABLE public.network_api_table ADD COLUMN channel VARCHAR;
+        END IF;
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'network_api_table' AND column_name = 'ets') THEN
+          ALTER TABLE public.network_api_table ADD COLUMN ets BIGINT;
+        END IF;
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'network_api_table' AND column_name = 'input') THEN
+          ALTER TABLE public.network_api_table ADD COLUMN input JSONB;
+        END IF;
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'network_api_table' AND column_name = 'output') THEN
+          ALTER TABLE public.network_api_table ADD COLUMN output JSONB;
+        END IF;
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'network_api_table' AND column_name = 'success') THEN
+          ALTER TABLE public.network_api_table ADD COLUMN success TEXT;
+        END IF;
+      END $$;
+    `);
+
     // Create event_processors table if not exists
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.event_processors(
@@ -781,6 +824,39 @@ event_type = 'OE_ITEM_RESPONSE',
 field_verification = 'edata.eks.target.asrResponseDetails',
   updated_at = NOW()
       WHERE table_name = 'asr_details';
+`);
+
+    // Insert network API telemetry event processor
+    await client.query(`
+      INSERT INTO public.event_processors(event_type, table_name, field_mappings, field_verification)
+VALUES
+  ('OE_ITEM_RESPONSE', 'network_api_table', '{
+    "uid": "uid",
+    "sid": "sid",
+    "channel": "channel",
+    "ets": "ets",
+    "input": "edata.eks.target.networkApiDetails.input",
+    "output": "edata.eks.target.networkApiDetails.output",
+    "success": "edata.eks.target.networkApiDetails.success"
+        }','edata.eks.target.networkApiDetails')
+      ON CONFLICT DO NOTHING;
+`);
+    await client.query(`
+      UPDATE public.event_processors
+SET
+event_type = 'OE_ITEM_RESPONSE',
+  field_mappings = '{
+    "uid": "uid",
+    "sid": "sid",
+    "channel": "channel",
+    "ets": "ets",
+    "input": "edata.eks.target.networkApiDetails.input",
+    "output": "edata.eks.target.networkApiDetails.output",
+    "success": "edata.eks.target.networkApiDetails.success"
+        }',
+field_verification = 'edata.eks.target.networkApiDetails',
+  updated_at = NOW()
+      WHERE table_name = 'network_api_table';
 `);
 
 

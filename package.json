@@ -11,7 +11,8 @@
     "dev": "nodemon index.js",
     "test": "jest --coverage",
     "lint": "eslint .",
-    "lint:fix": "eslint . --fix"
+    "lint:fix": "eslint . --fix",
+    "ingest": "node ingest_csv.js --file"
   },
   "dependencies": {
     "dotenv": "^16.3.1",

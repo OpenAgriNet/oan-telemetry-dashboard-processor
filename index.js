@@ -35,99 +35,99 @@ const pool = new Pool({
   database: process.env.DB_NAME,
   password: process.env.DB_PASSWORD,
   port: parseInt(process.env.DB_PORT || "5432", 10),
-  ssl: {
-    rejectUnauthorized: false
-  }
+  // ssl: {
+  //   rejectUnauthorized: false
+  // }
 });
 
-async function ensureVillagesSeeded() {
-  const client = await pool.connect();
-  try {
-    logger.info("Ensuring village_list table exists with expected columns...");
+// async function ensureVillagesSeeded() {
+//   const client = await pool.connect();
+//   try {
+//     logger.info("Ensuring village_list table exists with expected columns...");
 
-    // Create table with full schema if it does not exist (safe)
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS public.village_list (
-        village_code INTEGER PRIMARY KEY,
-        taluka_code INTEGER,
-        district_code INTEGER,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
+//     // Create table with full schema if it does not exist (safe)
+//     await client.query(`
+//       CREATE TABLE IF NOT EXISTS public.village_list (
+//         village_code INTEGER PRIMARY KEY,
+//         taluka_code INTEGER,
+//         district_code INTEGER,
+//         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+//       );
+//     `);
 
-    // Also ensure columns exist if older table was created with different schema
-    await client.query(`
-      ALTER TABLE public.village_list
-        ADD COLUMN IF NOT EXISTS taluka_code INTEGER,
-        ADD COLUMN IF NOT EXISTS district_code INTEGER,
-        ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
-    `);
+//     // Also ensure columns exist if older table was created with different schema
+//     await client.query(`
+//       ALTER TABLE public.village_list
+//         ADD COLUMN IF NOT EXISTS taluka_code INTEGER,
+//         ADD COLUMN IF NOT EXISTS district_code INTEGER,
+//         ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+//     `);
 
-    // check if table already has data
-    const { rows } = await client.query(
-      "SELECT COUNT(*)::bigint AS cnt FROM public.village_list"
-    );
-    const cnt = Number(rows[0].cnt || 0);
-    logger.info(`village_list row count = ${cnt}`);
+//     // check if table already has data
+//     const { rows } = await client.query(
+//       "SELECT COUNT(*)::bigint AS cnt FROM public.village_list"
+//     );
+//     const cnt = Number(rows[0].cnt || 0);
+//     logger.info(`village_list row count = ${cnt}`);
 
-    if (cnt > 0) {
-      logger.info("Villages table already seeded — skipping seeder.");
-      return;
-    }
+//     if (cnt > 0) {
+//       logger.info("Villages table already seeded — skipping seeder.");
+//       return;
+//     }
 
-    // spawn the existing seeder script (do not edit the seeder file)
-    logger.info(
-      "Villages table empty — running seeder script (seed_villages_stream.js). This may take some time..."
-    );
-    const seederPath = path.join(__dirname, "seed_villages_stream.js");
+//     // spawn the existing seeder script (do not edit the seeder file)
+//     logger.info(
+//       "Villages table empty — running seeder script (seed_villages_stream.js). This may take some time..."
+//     );
+//     const seederPath = path.join(__dirname, "seed_villages_stream.js");
 
-    const child = spawn(process.execPath, [seederPath], {
-      stdio: "inherit", // pipe seeder output to main stdout/stderr
-      env: process.env,
-      cwd: __dirname,
-    });
+//     const child = spawn(process.execPath, [seederPath], {
+//       stdio: "inherit", // pipe seeder output to main stdout/stderr
+//       env: process.env,
+//       cwd: __dirname,
+//     });
 
-    await new Promise((resolve, reject) => {
-      child.on("error", (err) => {
-        logger.error("Failed to start seeder process:", err);
-        reject(err);
-      });
-      child.on("exit", (code, signal) => {
-        if (code === 0) {
-          logger.info("Seeder completed successfully.");
-          resolve();
-        } else {
-          const msg = `Seeder exited with code ${code}${signal ? " signal " + signal : ""
-            }`;
-          logger.error(msg);
-          reject(new Error(msg));
-        }
-      });
-    });
-  } finally {
-    client.release();
-  }
-}
+//     await new Promise((resolve, reject) => {
+//       child.on("error", (err) => {
+//         logger.error("Failed to start seeder process:", err);
+//         reject(err);
+//       });
+//       child.on("exit", (code, signal) => {
+//         if (code === 0) {
+//           logger.info("Seeder completed successfully.");
+//           resolve();
+//         } else {
+//           const msg = `Seeder exited with code ${code}${signal ? " signal " + signal : ""
+//             }`;
+//           logger.error(msg);
+//           reject(new Error(msg));
+//         }
+//       });
+//     });
+//   } finally {
+//     client.release();
+//   }
+// }
 
 // call this at startup before starting the server
-(async () => {
-  try {
-    await ensureVillagesSeeded();
+// (async () => {
+//   try {
+    // await ensureVillagesSeeded();
     // continue with the rest of your startup:
     // await ensureTablesExist();
     // await loadEventProcessors.loadFromDatabase(pool);
     // start server...
-  } catch (err) {
-    logger.error("Startup aborted due to seeding failure:", err);
-    process.exit(1);
-  }
-})();
+//   } catch (err) {
+//     logger.error("Startup aborted due to seeding failure:", err);
+//     process.exit(1);
+//   }
+// })();
 
 const PORT = process.env.PORT || 3000;
 const BATCH_SIZE = process.env.BATCH_SIZE || 10;
 const CRON_SCHEDULE = process.env.CRON_SCHEDULE || "*/5 * * * *";
-const LEADERBOARD_REFRESH_SCHEDULE =
-  process.env.LEADERBOARD_REFRESH_SCHEDULE || "0 1 * * *"; // Run at 1 AM every day
+// const LEADERBOARD_REFRESH_SCHEDULE =
+  // process.env.LEADERBOARD_REFRESH_SCHEDULE || "0 1 * * *"; // Run at 1 AM every day
 const IS_NEW_BACKFILL_SCHEDULE = process.env.IS_NEW_BACKFILL_SCHEDULE || "*/30 * * * *"; // Run every 30 minutes
 const MV_REFRESH_SCHEDULE = process.env.MV_REFRESH_SCHEDULE || "*/15 * * * *"; // Refresh materialized views every 15 minutes
 
@@ -199,23 +199,23 @@ async function ensureTablesExist() {
       `);
 
     // Create leaderboard table if not exists
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS public.leaderboard(
-        unique_id VARCHAR NOT NULL,
-        mobile VARCHAR,
-        username VARCHAR,
-        email VARCHAR,
-        role VARCHAR,
-        farmer_id VARCHAR,
-        registered_location JSONB,
-        record_count INTEGER,
-        village_code BIGINT,
-        taluka_code INTEGER,
-        district_code INTEGER,
-        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY(unique_id)
-      )
-      `);
+    // await client.query(`
+    //   CREATE TABLE IF NOT EXISTS public.leaderboard(
+    //     unique_id VARCHAR NOT NULL,
+    //     mobile VARCHAR,
+    //     username VARCHAR,
+    //     email VARCHAR,
+    //     role VARCHAR,
+    //     farmer_id VARCHAR,
+    //     registered_location JSONB,
+    //     record_count INTEGER,
+    //     village_code BIGINT,
+    //     taluka_code INTEGER,
+    //     district_code INTEGER,
+    //     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    //     PRIMARY KEY(unique_id)
+    //   )
+    //   `);
 
     await client.query(`
       ALTER TABLE public.questions
@@ -380,6 +380,141 @@ async function ensureTablesExist() {
         END IF;
         IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'feedback' AND column_name = 'fingerprint_id') THEN
           ALTER TABLE public.feedback ADD COLUMN fingerprint_id VARCHAR(64);
+        END IF;
+      END $$;
+    `);
+
+    // Create tts_details table if not exists
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.tts_details(
+      id UUID DEFAULT gen_random_uuid(),
+      unique_id VARCHAR,
+      uid VARCHAR,
+      sid VARCHAR,
+      channel VARCHAR,
+      ets BIGINT,
+      qid VARCHAR,
+      apiType VARCHAR,
+      apiService VARCHAR,
+      success BOOLEAN,
+      latencyMs NUMERIC,
+      statusCode INTEGER,
+      errorCode VARCHAR,
+      errorMessage TEXT,
+      language VARCHAR,
+      sessionId VARCHAR,
+      text TEXT,
+      mobile VARCHAR,
+      farmer_id VARCHAR,
+      fingerprint_id VARCHAR(64),
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+      `);
+
+    // Add missing columns to tts_details table if they don't exist
+    await client.query(`
+      DO $$
+    BEGIN 
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'tts_details' AND column_name = 'unique_id') THEN
+          ALTER TABLE public.tts_details ADD COLUMN unique_id VARCHAR;
+        END IF;
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'tts_details' AND column_name = 'mobile') THEN
+          ALTER TABLE public.tts_details ADD COLUMN mobile VARCHAR;
+        END IF;
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'tts_details' AND column_name = 'farmer_id') THEN
+          ALTER TABLE public.tts_details ADD COLUMN farmer_id VARCHAR;
+        END IF;
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'tts_details' AND column_name = 'fingerprint_id') THEN
+          ALTER TABLE public.tts_details ADD COLUMN fingerprint_id VARCHAR(64);
+        END IF;
+      END $$;
+    `);
+
+    // Create asr_details table if not exists
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.asr_details(
+      id UUID DEFAULT gen_random_uuid(),
+      unique_id VARCHAR,
+      uid VARCHAR,
+      sid VARCHAR,
+      channel VARCHAR,
+      ets BIGINT,
+      qid VARCHAR,
+      apiType VARCHAR,
+      apiService VARCHAR,
+      success BOOLEAN,
+      latencyMs NUMERIC,
+      statusCode INTEGER,
+      errorCode VARCHAR,
+      errorMessage TEXT,
+      language VARCHAR,
+      sessionId VARCHAR,
+      text TEXT,
+      mobile VARCHAR,
+      farmer_id VARCHAR,
+      fingerprint_id VARCHAR(64),
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+      `);
+
+    // Add missing columns to asr_details table if they don't exist
+    await client.query(`
+      DO $$
+    BEGIN 
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'asr_details' AND column_name = 'unique_id') THEN
+          ALTER TABLE public.asr_details ADD COLUMN unique_id VARCHAR;
+        END IF;
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'asr_details' AND column_name = 'mobile') THEN
+          ALTER TABLE public.asr_details ADD COLUMN mobile VARCHAR;
+        END IF;
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'asr_details' AND column_name = 'farmer_id') THEN
+          ALTER TABLE public.asr_details ADD COLUMN farmer_id VARCHAR;
+        END IF;
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'asr_details' AND column_name = 'fingerprint_id') THEN
+          ALTER TABLE public.asr_details ADD COLUMN fingerprint_id VARCHAR(64);
+        END IF;
+      END $$;
+    `);
+
+    // Create network_api_table for beckn network API telemetry
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.network_api_table(
+      id SERIAL PRIMARY KEY,
+      uid VARCHAR,
+      sid VARCHAR,
+      channel VARCHAR,
+      ets BIGINT,
+      input JSONB,
+      output JSONB,
+      success TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+      `);
+
+    // Add missing columns to network_api_table if they don't exist
+    await client.query(`
+      DO $$
+    BEGIN 
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'network_api_table' AND column_name = 'uid') THEN
+          ALTER TABLE public.network_api_table ADD COLUMN uid VARCHAR;
+        END IF;
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'network_api_table' AND column_name = 'sid') THEN
+          ALTER TABLE public.network_api_table ADD COLUMN sid VARCHAR;
+        END IF;
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'network_api_table' AND column_name = 'channel') THEN
+          ALTER TABLE public.network_api_table ADD COLUMN channel VARCHAR;
+        END IF;
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'network_api_table' AND column_name = 'ets') THEN
+          ALTER TABLE public.network_api_table ADD COLUMN ets BIGINT;
+        END IF;
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'network_api_table' AND column_name = 'input') THEN
+          ALTER TABLE public.network_api_table ADD COLUMN input JSONB;
+        END IF;
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'network_api_table' AND column_name = 'output') THEN
+          ALTER TABLE public.network_api_table ADD COLUMN output JSONB;
+        END IF;
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'network_api_table' AND column_name = 'success') THEN
+          ALTER TABLE public.network_api_table ADD COLUMN success TEXT;
         END IF;
       END $$;
     `);
@@ -579,6 +714,151 @@ field_verification = 'edata.eks.target.feedbackDetails',
       WHERE table_name = 'feedback';
 `);
 
+    await client.query(`
+      INSERT INTO public.event_processors(event_type, table_name, field_mappings, field_verification)
+VALUES
+  ('OE_ITEM_RESPONSE', 'tts_details', '{
+          "unique_id": "edata.eks.target.unique_id",
+    "uid": "uid",
+    "sid": "sid",
+    "channel": "channel",
+    "ets": "ets",
+    "qid": "edata.eks.qid",
+    "apiType": "edata.eks.target.ttsResponseDetails.apiType",
+    "apiService": "edata.eks.target.ttsResponseDetails.apiService",
+    "success": "edata.eks.target.ttsResponseDetails.success",
+    "latencyMs": "edata.eks.target.ttsResponseDetails.latencyMs",
+    "statusCode": "edata.eks.target.ttsResponseDetails.statusCode",
+    "errorCode": "edata.eks.target.ttsResponseDetails.errorCode",
+    "errorMessage": "edata.eks.target.ttsResponseDetails.errorMessage",
+    "language": "edata.eks.target.ttsResponseDetails.language",
+    "sessionId": "edata.eks.target.ttsResponseDetails.sessionId",
+    "text": "edata.eks.target.ttsResponseDetails.text",
+    "mobile": "edata.eks.target.mobile",
+    "farmer_id": "edata.eks.target.farmer_id",
+    "fingerprint_id": "edata.eks.fingerprint_details.device_id"
+        }','edata.eks.target.ttsResponseDetails')
+      ON CONFLICT DO NOTHING;
+`);
+    await client.query(`
+      UPDATE public.event_processors
+SET
+event_type = 'OE_ITEM_RESPONSE',
+  field_mappings = '{
+"unique_id": "edata.eks.target.unique_id",
+  "uid": "uid",
+    "sid": "sid",
+      "channel": "channel",
+        "ets": "ets",
+          "qid": "edata.eks.qid",
+            "apiType": "edata.eks.target.ttsResponseDetails.apiType",
+              "apiService": "edata.eks.target.ttsResponseDetails.apiService",
+                "success": "edata.eks.target.ttsResponseDetails.success",
+                  "latencyMs": "edata.eks.target.ttsResponseDetails.latencyMs",
+                    "statusCode": "edata.eks.target.ttsResponseDetails.statusCode",
+                      "errorCode": "edata.eks.target.ttsResponseDetails.errorCode",
+                        "errorMessage": "edata.eks.target.ttsResponseDetails.errorMessage",
+                          "language": "edata.eks.target.ttsResponseDetails.language",
+                            "sessionId": "edata.eks.target.ttsResponseDetails.sessionId",
+                              "text": "edata.eks.target.ttsResponseDetails.text",
+                                "mobile": "edata.eks.target.mobile",
+                                  "farmer_id": "edata.eks.target.farmer_id",
+                                    "fingerprint_id": "edata.eks.fingerprint_details.device_id"
+        }',
+field_verification = 'edata.eks.target.ttsResponseDetails',
+  updated_at = NOW()
+      WHERE table_name = 'tts_details';
+`);
+
+    await client.query(`
+      INSERT INTO public.event_processors(event_type, table_name, field_mappings, field_verification)
+VALUES
+  ('OE_ITEM_RESPONSE', 'asr_details', '{
+          "unique_id": "edata.eks.target.unique_id",
+    "uid": "uid",
+    "sid": "sid",
+    "channel": "channel",
+    "ets": "ets",
+    "qid": "edata.eks.qid",
+    "apiType": "edata.eks.target.asrResponseDetails.apiType",
+    "apiService": "edata.eks.target.asrResponseDetails.apiService",
+    "success": "edata.eks.target.asrResponseDetails.success",
+    "latencyMs": "edata.eks.target.asrResponseDetails.latencyMs",
+    "statusCode": "edata.eks.target.asrResponseDetails.statusCode",
+    "errorCode": "edata.eks.target.asrResponseDetails.errorCode",
+    "errorMessage": "edata.eks.target.asrResponseDetails.errorMessage",
+    "language": "edata.eks.target.asrResponseDetails.language",
+    "sessionId": "edata.eks.target.asrResponseDetails.sessionId",
+    "text": "edata.eks.target.asrResponseDetails.text",
+    "mobile": "edata.eks.target.mobile",
+    "farmer_id": "edata.eks.target.farmer_id",
+    "fingerprint_id": "edata.eks.fingerprint_details.device_id"
+        }','edata.eks.target.asrResponseDetails')
+      ON CONFLICT DO NOTHING;
+`);
+    await client.query(`
+      UPDATE public.event_processors
+SET
+event_type = 'OE_ITEM_RESPONSE',
+  field_mappings = '{
+"unique_id": "edata.eks.target.unique_id",
+  "uid": "uid",
+    "sid": "sid",
+      "channel": "channel",
+        "ets": "ets",
+          "qid": "edata.eks.qid",
+            "apiType": "edata.eks.target.asrResponseDetails.apiType",
+              "apiService": "edata.eks.target.asrResponseDetails.apiService",
+                "success": "edata.eks.target.asrResponseDetails.success",
+                  "latencyMs": "edata.eks.target.asrResponseDetails.latencyMs",
+                    "statusCode": "edata.eks.target.asrResponseDetails.statusCode",
+                      "errorCode": "edata.eks.target.asrResponseDetails.errorCode",
+                        "errorMessage": "edata.eks.target.asrResponseDetails.errorMessage",
+                          "language": "edata.eks.target.asrResponseDetails.language",
+                            "sessionId": "edata.eks.target.asrResponseDetails.sessionId",
+                              "text": "edata.eks.target.asrResponseDetails.text",
+                                "mobile": "edata.eks.target.mobile",
+                                  "farmer_id": "edata.eks.target.farmer_id",
+                                    "fingerprint_id": "edata.eks.fingerprint_details.device_id"
+        }',
+field_verification = 'edata.eks.target.asrResponseDetails',
+  updated_at = NOW()
+      WHERE table_name = 'asr_details';
+`);
+
+    // Insert network API telemetry event processor
+    await client.query(`
+      INSERT INTO public.event_processors(event_type, table_name, field_mappings, field_verification)
+VALUES
+  ('OE_ITEM_RESPONSE', 'network_api_table', '{
+    "uid": "uid",
+    "sid": "sid",
+    "channel": "channel",
+    "ets": "ets",
+    "input": "edata.eks.target.networkApiDetails.input",
+    "output": "edata.eks.target.networkApiDetails.output",
+    "success": "edata.eks.target.networkApiDetails.success"
+        }','edata.eks.target.networkApiDetails')
+      ON CONFLICT DO NOTHING;
+`);
+    await client.query(`
+      UPDATE public.event_processors
+SET
+event_type = 'OE_ITEM_RESPONSE',
+  field_mappings = '{
+    "uid": "uid",
+    "sid": "sid",
+    "channel": "channel",
+    "ets": "ets",
+    "input": "edata.eks.target.networkApiDetails.input",
+    "output": "edata.eks.target.networkApiDetails.output",
+    "success": "edata.eks.target.networkApiDetails.success"
+        }',
+field_verification = 'edata.eks.target.networkApiDetails',
+  updated_at = NOW()
+      WHERE table_name = 'network_api_table';
+`);
+
 
     // ============================================
     // V2 SCHEMA: Users and Sessions Tables (Simplified - no devices table)
@@ -660,52 +940,52 @@ BEGIN
     await client.query(`CREATE INDEX IF NOT EXISTS idx_users_os ON users(os_code)`);
 
     // Create sessions table for V2 (no device_id - device info stored in users)
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS public.sessions(
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  session_id VARCHAR(64) UNIQUE NOT NULL,
-  user_id VARCHAR(255),
-  channel VARCHAR(255),
-  session_start_at BIGINT NOT NULL,
-  session_end_at BIGINT,
-  duration_seconds INTEGER,
-  render_duration_ms INTEGER,
-  server_duration_ms INTEGER,
-  created_at TIMESTAMP DEFAULT NOW()
-)
-  `);
+//     await client.query(`
+//       CREATE TABLE IF NOT EXISTS public.sessions(
+//   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+//   session_id VARCHAR(64) UNIQUE NOT NULL,
+//   user_id VARCHAR(255),
+//   channel VARCHAR(255),
+//   session_start_at BIGINT NOT NULL,
+//   session_end_at BIGINT,
+//   duration_seconds INTEGER,
+//   render_duration_ms INTEGER,
+//   server_duration_ms INTEGER,
+//   created_at TIMESTAMP DEFAULT NOW()
+// )
+//   `);
     // Migration: Change user_id from UUID to VARCHAR for existing tables
-    await client.query(`
-      DO $$
-BEGIN 
-        IF EXISTS(
-  SELECT 1 FROM information_schema.columns 
-          WHERE table_schema = 'public' AND table_name = 'sessions' AND column_name = 'user_id' AND data_type = 'uuid'
-) THEN
-          ALTER TABLE public.sessions ALTER COLUMN user_id TYPE VARCHAR(255);
-        END IF;
-      END $$;
-`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_sessions_session_id ON sessions(session_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_sessions_start ON sessions(session_start_at)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_sessions_channel ON sessions(channel)`);
+//     await client.query(`
+//       DO $$
+// BEGIN 
+//         IF EXISTS(
+//   SELECT 1 FROM information_schema.columns 
+//           WHERE table_schema = 'public' AND table_name = 'sessions' AND column_name = 'user_id' AND data_type = 'uuid'
+// ) THEN
+//           ALTER TABLE public.sessions ALTER COLUMN user_id TYPE VARCHAR(255);
+//         END IF;
+//       END $$;
+// `);
+    // await client.query(`CREATE INDEX IF NOT EXISTS idx_sessions_session_id ON sessions(session_id)`);
+    // await client.query(`CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)`);
+    // await client.query(`CREATE INDEX IF NOT EXISTS idx_sessions_start ON sessions(session_start_at)`);
+    // await client.query(`CREATE INDEX IF NOT EXISTS idx_sessions_channel ON sessions(channel)`);
 
     // Add session_id to existing tables for V2 linking
-    await client.query(`
-      ALTER TABLE questions ADD COLUMN IF NOT EXISTS session_id UUID REFERENCES sessions(id)
-    `);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_questions_session ON questions(session_id)`);
+    // await client.query(`
+    //   ALTER TABLE questions ADD COLUMN IF NOT EXISTS session_id UUID REFERENCES sessions(id)
+    // `);
+    // await client.query(`CREATE INDEX IF NOT EXISTS idx_questions_session ON questions(session_id)`);
 
-    await client.query(`
-      ALTER TABLE feedback ADD COLUMN IF NOT EXISTS session_id UUID REFERENCES sessions(id)
-    `);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_feedback_session ON feedback(session_id)`);
+    // await client.query(`
+    //   ALTER TABLE feedback ADD COLUMN IF NOT EXISTS session_id UUID REFERENCES sessions(id)
+    // `);
+    // await client.query(`CREATE INDEX IF NOT EXISTS idx_feedback_session ON feedback(session_id)`);
 
-    await client.query(`
-      ALTER TABLE errorDetails ADD COLUMN IF NOT EXISTS session_id UUID REFERENCES sessions(id)
-    `);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_errordetails_session ON errorDetails(session_id)`);
+    // await client.query(`
+    //   ALTER TABLE errorDetails ADD COLUMN IF NOT EXISTS session_id UUID REFERENCES sessions(id)
+    // `);
+    // await client.query(`CREATE INDEX IF NOT EXISTS idx_errordetails_session ON errorDetails(session_id)`);
 
     logger.info("Database tables verified and created if needed (including V2 schema)");
   } catch (err) {
@@ -814,75 +1094,75 @@ mobile = COALESCE(EXCLUDED.mobile, users.mobile),
  * @param {string|null} uid - User UID (fingerprint-based or original)
  * @returns {string|null} - Session UUID or null
  */
-async function processSessionStart(client, event, uid) {
-  try {
-    const sid = event.sid;
-    if (!sid) {
-      logger.debug('No session_id (sid) found, skipping session insert');
-      return null;
-    }
+// async function processSessionStart(client, event, uid) {
+//   try {
+//     const sid = event.sid;
+//     if (!sid) {
+//       logger.debug('No session_id (sid) found, skipping session insert');
+//       return null;
+//     }
 
-    const fingerprint = event.edata?.eks?.fingerprint_details;
-    const sessionStartAt = fingerprint?.session?.session_start_at || event.ets;
+//     const fingerprint = event.edata?.eks?.fingerprint_details;
+//     const sessionStartAt = fingerprint?.session?.session_start_at || event.ets;
 
-    const result = await client.query(`
-      INSERT INTO sessions(session_id, user_id, channel, session_start_at)
-VALUES($1, $2, $3, $4)
-      ON CONFLICT(session_id) DO UPDATE SET
-user_id = COALESCE(EXCLUDED.user_id, sessions.user_id)
-      RETURNING id
-    `, [sid, uid, event.channel, sessionStartAt]);
+//     const result = await client.query(`
+//       INSERT INTO sessions(session_id, user_id, channel, session_start_at)
+// VALUES($1, $2, $3, $4)
+//       ON CONFLICT(session_id) DO UPDATE SET
+// user_id = COALESCE(EXCLUDED.user_id, sessions.user_id)
+//       RETURNING id
+//     `, [sid, uid, event.channel, sessionStartAt]);
 
-    const sessionId = result.rows[0]?.id;
-    logger.debug(`Session started: sid = ${sid}, id = ${sessionId}, uid = ${uid} `);
-    return sessionId;
-  } catch (err) {
-    logger.error(`Error processing session start: ${err.message} `);
-    return null;
-  }
-}
+//     const sessionId = result.rows[0]?.id;
+//     logger.debug(`Session started: sid = ${sid}, id = ${sessionId}, uid = ${uid} `);
+//     return sessionId;
+//   } catch (err) {
+//     logger.error(`Error processing session start: ${err.message} `);
+//     return null;
+//   }
+// }
 
 /**
  * Process session end (OE_END event) - update with end time, duration, performance
  * @param {Object} client - Database client
  * @param {Object} event - Telemetry event
  */
-async function processSessionEnd(client, event) {
-  try {
-    const sid = event.sid;
-    if (!sid) {
-      logger.debug('No session_id (sid) found, skipping session end update');
-      return;
-    }
+// async function processSessionEnd(client, event) {
+//   try {
+//     const sid = event.sid;
+//     if (!sid) {
+//       logger.debug('No session_id (sid) found, skipping session end update');
+//       return;
+//     }
 
-    const fingerprint = event.edata?.eks?.fingerprint_details;
-    const sessionEndAt = fingerprint?.session?.session_end_at || event.ets;
-    const sessionStartAt = fingerprint?.session?.session_start_at;
+//     const fingerprint = event.edata?.eks?.fingerprint_details;
+//     const sessionEndAt = fingerprint?.session?.session_end_at || event.ets;
+//     const sessionStartAt = fingerprint?.session?.session_start_at;
 
-    // Calculate duration in seconds
-    let durationSeconds = null;
-    if (sessionStartAt && sessionEndAt) {
-      durationSeconds = Math.floor((sessionEndAt - sessionStartAt) / 1000);
-    }
+//     // Calculate duration in seconds
+//     let durationSeconds = null;
+//     if (sessionStartAt && sessionEndAt) {
+//       durationSeconds = Math.floor((sessionEndAt - sessionStartAt) / 1000);
+//     }
 
-    // Performance metrics
-    const renderDurationMs = fingerprint?.performance?.render_duration_ms || null;
-    const serverDurationMs = fingerprint?.performance?.server_duration_ms || null;
+//     // Performance metrics
+//     const renderDurationMs = fingerprint?.performance?.render_duration_ms || null;
+//     const serverDurationMs = fingerprint?.performance?.server_duration_ms || null;
 
-    await client.query(`
-      UPDATE sessions SET
-session_end_at = $1,
-  duration_seconds = $2,
-  render_duration_ms = $3,
-  server_duration_ms = $4
-      WHERE session_id = $5
-  `, [sessionEndAt, durationSeconds, renderDurationMs, serverDurationMs, sid]);
+//     await client.query(`
+//       UPDATE sessions SET
+// session_end_at = $1,
+//   duration_seconds = $2,
+//   render_duration_ms = $3,
+//   server_duration_ms = $4
+//       WHERE session_id = $5
+//   `, [sessionEndAt, durationSeconds, renderDurationMs, serverDurationMs, sid]);
 
-    logger.debug(`Session ended: sid = ${sid}, duration = ${durationSeconds} s`);
-  } catch (err) {
-    logger.error(`Error processing session end: ${err.message} `);
-  }
-}
+//     logger.debug(`Session ended: sid = ${sid}, duration = ${durationSeconds} s`);
+//   } catch (err) {
+//     logger.error(`Error processing session end: ${err.message} `);
+//   }
+// }
 
 /**
  * Get session UUID by session_id (sid)
@@ -890,19 +1170,19 @@ session_end_at = $1,
  * @param {string} sid - Session ID from telemetry
  * @returns {string|null} - Session UUID or null
  */
-async function getSessionIdBySid(client, sid) {
-  try {
-    if (!sid) return null;
-    const result = await client.query(
-      'SELECT id FROM sessions WHERE session_id = $1',
-      [sid]
-    );
-    return result.rows[0]?.id || null;
-  } catch (err) {
-    logger.error(`Error getting session id: ${err.message} `);
-    return null;
-  }
-}
+// async function getSessionIdBySid(client, sid) {
+//   try {
+//     if (!sid) return null;
+//     const result = await client.query(
+//       'SELECT id FROM sessions WHERE session_id = $1',
+//       [sid]
+//     );
+//     return result.rows[0]?.id || null;
+//   } catch (err) {
+//     logger.error(`Error getting session id: ${err.message} `);
+//     return null;
+//   }
+// }
 
 // Parse telemetry message JSON
 function parseTelemetryMessage(message, batchId = '', logIndex = 0) {
@@ -980,11 +1260,32 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()} `) {
         const eventMid = event.mid || 'unknown';
         logger.debug(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}/${events.length}] Processing event type: ${eventType}, uid: ${eventUid}, mid: ${eventMid} `);
 
+        // Check if this is a TTS or ASR event
+        const hasTtsResponse = getNestedValue(event, 'edata.eks.target.ttsResponseDetails');
+        const hasAsrResponse = getNestedValue(event, 'edata.eks.target.asrResponseDetails');
+
         let eventProcessed = false;
         let matchedProcessor = null;
 
+        // PRIORITY CHECK: Process ASR/TTS events first (they have higher priority)
+        // This prevents them from being consumed by the questions processor
+        const priorityProcessors = [];
+        const regularProcessors = [];
+
+        // Separate priority processors from regular ones
         for (const key in eventProcessors) {
           const processor = eventProcessors[key];
+          if (processor["tableName"] === 'tts_details' || processor["tableName"] === 'asr_details') {
+            priorityProcessors.push({ key, processor });
+          } else {
+            regularProcessors.push({ key, processor });
+          }
+        }
+
+        // Combine: priority processors first, then regular ones
+        const orderedProcessors = [...priorityProcessors, ...regularProcessors];
+
+        for (const { key, processor } of orderedProcessors) {
           const verified = getNestedValue(
             event,
             processor["fieldVerification"]
@@ -992,11 +1293,28 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()} `) {
 
           logger.debug(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}] Checking processor '${key}': eventType match = ${processor["eventType"] === eventType}, verified = ${verified !== undefined} `);
 
+          // CRITICAL: Skip questions processor if ASR/TTS response exists
+          // This prevents ASR/TTS events from being consumed by questions processor
+          if (processor["tableName"] === 'questions' && (hasAsrResponse || hasTtsResponse)) {
+            continue;
+          }
+
           if (
             processor["eventType"] === eventType &&
             verified !== undefined &&
             !eventProcessed
           ) {
+            // Skip the 'questions' processor for events that have TTS or ASR data
+            // to prevent TTS/ASR events from being duplicated into the questions table
+            if (processor["tableName"] === "questions") {
+              const hasTtsData = getNestedValue(event, "edata.eks.target.ttsResponseDetails");
+              const hasAsrData = getNestedValue(event, "edata.eks.target.asrResponseDetails");
+              if (hasTtsData !== undefined || hasAsrData !== undefined) {
+                logger.debug(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}] Skipping 'questions' processor for TTS/ASR event`);
+                continue;
+              }
+            }
+
             matchedProcessor = key;
             logger.info(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}]mid: ${eventMid} - Matched processor '${key}' for event type '${eventType}'`);
 
@@ -1032,7 +1350,7 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()} `) {
             const fingerprint = event.edata?.eks?.fingerprint_details;
             const uid = fingerprint?.device_id ? `fp_${fingerprint.device_id}` : event.uid;
             await processUserData(client, event);
-            await processSessionStart(client, event, uid);
+            // await processSessionStart(client, event, uid);
             logger.info(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}] V2 OE_START processed: uid = ${uid} `);
           } catch (v2Err) {
             logger.error(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}] V2 OE_START error: ${v2Err.message} `);
@@ -1041,7 +1359,7 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()} `) {
           // V2: Process OE_END to update session with end time and performance
           logger.info(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}] Processing OE_END for V2(session end)`);
           try {
-            await processSessionEnd(client, event);
+            // await processSessionEnd(client, event);
             // Update user's last_seen_at with fingerprint-based uid
             const fingerprint = event.edata?.eks?.fingerprint_details;
             const uid = fingerprint?.device_id ? `fp_${fingerprint.device_id}` : event.uid;
@@ -1344,132 +1662,132 @@ app.get("/health", (req, res) => {
 });
 
 // Function to refresh user location aggregation data
-const LEADERBOARD_CUTOFF_DATE =
-  process.env.LEADERBOARD_CUTOFF_DATE || "2025-10-01 00:00:00";
-async function refreshLeaderboardAggregation() {
-  const client = await pool.connect();
-  try {
-    logger.info("Starting leaderboard refresh (most-recent-location)");
+// const LEADERBOARD_CUTOFF_DATE =
+//   process.env.LEADERBOARD_CUTOFF_DATE || "2025-10-01 00:00:00";
+// async function refreshLeaderboardAggregation() {
+//   const client = await pool.connect();
+//   try {
+//     logger.info("Starting leaderboard refresh (most-recent-location)");
 
-    await client.query("BEGIN");
+//     await client.query("BEGIN");
 
-    // 1) Ensure columns exist
-    await client.query(`
-      ALTER TABLE public.leaderboard
-        ADD COLUMN IF NOT EXISTS village_code BIGINT,
-        ADD COLUMN IF NOT EXISTS taluka_code INTEGER,
-        ADD COLUMN IF NOT EXISTS district_code INTEGER;
-    `);
+//     // 1) Ensure columns exist
+//     await client.query(`
+//       ALTER TABLE public.leaderboard
+//         ADD COLUMN IF NOT EXISTS village_code BIGINT,
+//         ADD COLUMN IF NOT EXISTS taluka_code INTEGER,
+//         ADD COLUMN IF NOT EXISTS district_code INTEGER;
+//     `);
 
-    // 2) Truncate leaderboard (separate statement)
-    await client.query("TRUNCATE TABLE public.leaderboard");
+//     // 2) Truncate leaderboard (separate statement)
+//     await client.query("TRUNCATE TABLE public.leaderboard");
 
-    // 3) Insert aggregated snapshot (single statement with parameter)
-    await client.query(
-      `
-      WITH per_user_lgd AS (
-        SELECT
-          q.unique_id,
-          (q.registered_location->>'lgd_code') AS lgd_code_text,
-          MAX(q.created_at) AS max_created_at,
-          MIN(q.registered_location::text) FILTER (WHERE (q.registered_location->>'lgd_code') IS NOT NULL) AS any_reg_loc_for_lgd,
-          COUNT(*) AS cnt_for_lgd
-        FROM public.questions q
-        WHERE q.created_at >= $1
-          AND q.unique_id IS NOT NULL
-        GROUP BY q.unique_id, (q.registered_location->>'lgd_code')
-      ),
-      best_loc AS (
-        SELECT unique_id, lgd_code_text AS chosen_lgd_code, any_reg_loc_for_lgd
-        FROM (
-          SELECT
-            unique_id,
-            lgd_code_text,
-            any_reg_loc_for_lgd,
-            max_created_at,
-            ROW_NUMBER() OVER (PARTITION BY unique_id ORDER BY max_created_at DESC, lgd_code_text ASC) AS rn
-          FROM per_user_lgd
-        ) t
-        WHERE rn = 1
-      ),
-      totals AS (
-        SELECT
-          q.unique_id,
-          COUNT(*) AS total_count,
-          MAX(q.mobile) AS mobile,
-          MAX(q.username) AS username,
-          MAX(q.email) AS email,
-          MAX(q.role) AS role,
-          MAX(q.farmer_id) AS farmer_id
-        FROM public.questions q
-        WHERE q.created_at >= $1
-          AND q.unique_id IS NOT NULL
-          AND q.answertext IS NOT NULL
-        GROUP BY q.unique_id
-      )
-      INSERT INTO public.leaderboard (
-        unique_id, mobile, username, email, role, farmer_id, registered_location,
-        village_code, taluka_code, district_code, record_count, last_updated
-      )
-      SELECT
-        t.unique_id,
-        t.mobile,
-        t.username,
-        t.email,
-        t.role,
-        t.farmer_id,
-        CASE WHEN b.any_reg_loc_for_lgd IS NOT NULL THEN (b.any_reg_loc_for_lgd)::jsonb ELSE NULL END AS registered_location,
-        v.village_code,
-        v.taluka_code,
-        v.district_code,
-        t.total_count AS record_count,
-        CURRENT_TIMESTAMP AS last_updated
-      FROM totals t
-      LEFT JOIN best_loc b ON t.unique_id = b.unique_id
-      LEFT JOIN public.village_list v ON b.chosen_lgd_code = v.village_code::text;
-      `,
-      [LEADERBOARD_CUTOFF_DATE]
-    );
+//     // 3) Insert aggregated snapshot (single statement with parameter)
+//     await client.query(
+//       `
+//       WITH per_user_lgd AS (
+//         SELECT
+//           q.unique_id,
+//           (q.registered_location->>'lgd_code') AS lgd_code_text,
+//           MAX(q.created_at) AS max_created_at,
+//           MIN(q.registered_location::text) FILTER (WHERE (q.registered_location->>'lgd_code') IS NOT NULL) AS any_reg_loc_for_lgd,
+//           COUNT(*) AS cnt_for_lgd
+//         FROM public.questions q
+//         WHERE q.created_at >= $1
+//           AND q.unique_id IS NOT NULL
+//         GROUP BY q.unique_id, (q.registered_location->>'lgd_code')
+//       ),
+//       best_loc AS (
+//         SELECT unique_id, lgd_code_text AS chosen_lgd_code, any_reg_loc_for_lgd
+//         FROM (
+//           SELECT
+//             unique_id,
+//             lgd_code_text,
+//             any_reg_loc_for_lgd,
+//             max_created_at,
+//             ROW_NUMBER() OVER (PARTITION BY unique_id ORDER BY max_created_at DESC, lgd_code_text ASC) AS rn
+//           FROM per_user_lgd
+//         ) t
+//         WHERE rn = 1
+//       ),
+//       totals AS (
+//         SELECT
+//           q.unique_id,
+//           COUNT(*) AS total_count,
+//           MAX(q.mobile) AS mobile,
+//           MAX(q.username) AS username,
+//           MAX(q.email) AS email,
+//           MAX(q.role) AS role,
+//           MAX(q.farmer_id) AS farmer_id
+//         FROM public.questions q
+//         WHERE q.created_at >= $1
+//           AND q.unique_id IS NOT NULL
+//           AND q.answertext IS NOT NULL
+//         GROUP BY q.unique_id
+//       )
+//       INSERT INTO public.leaderboard (
+//         unique_id, mobile, username, email, role, farmer_id, registered_location,
+//         village_code, taluka_code, district_code, record_count, last_updated
+//       )
+//       SELECT
+//         t.unique_id,
+//         t.mobile,
+//         t.username,
+//         t.email,
+//         t.role,
+//         t.farmer_id,
+//         CASE WHEN b.any_reg_loc_for_lgd IS NOT NULL THEN (b.any_reg_loc_for_lgd)::jsonb ELSE NULL END AS registered_location,
+//         v.village_code,
+//         v.taluka_code,
+//         v.district_code,
+//         t.total_count AS record_count,
+//         CURRENT_TIMESTAMP AS last_updated
+//       FROM totals t
+//       LEFT JOIN best_loc b ON t.unique_id = b.unique_id
+//       LEFT JOIN public.village_list v ON b.chosen_lgd_code = v.village_code::text;
+//       `,
+//       [LEADERBOARD_CUTOFF_DATE]
+//     );
 
-    await client.query("COMMIT");
-    logger.info(
-      "Leaderboard refresh completed successfully (most-recent-location)."
-    );
-  } catch (err) {
-    await client.query("ROLLBACK");
-    logger.error("Error refreshing leaderboard (most-recent-location):", err);
-    throw err;
-  } finally {
-    client.release();
-  }
-}
+//     await client.query("COMMIT");
+//     logger.info(
+//       "Leaderboard refresh completed successfully (most-recent-location)."
+//     );
+//   } catch (err) {
+//     await client.query("ROLLBACK");
+//     logger.error("Error refreshing leaderboard (most-recent-location):", err);
+//     throw err;
+//   } finally {
+//     client.release();
+//   }
+// }
 
 // Schedule leaderboard refresh job to run at 1 AM daily
-cron.schedule(LEADERBOARD_REFRESH_SCHEDULE, async () => {
-  logger.info(
-    `Running scheduled leaderboard refresh (${LEADERBOARD_REFRESH_SCHEDULE})`
-  );
-  try {
-    await refreshLeaderboardAggregation();
-  } catch (err) {
-    logger.error("Scheduled leaderboard refresh failed:", err);
-  }
-});
+// cron.schedule(LEADERBOARD_REFRESH_SCHEDULE, async () => {
+//   logger.info(
+//     `Running scheduled leaderboard refresh (${LEADERBOARD_REFRESH_SCHEDULE})`
+//   );
+//   try {
+//     await refreshLeaderboardAggregation();
+//   } catch (err) {
+//     logger.error("Scheduled leaderboard refresh failed:", err);
+//   }
+// });
 
 // API endpoint to manually trigger leaderboard refresh
-app.post("/api/refresh-leaderboard", async (req, res) => {
-  try {
-    await refreshLeaderboardAggregation();
-    res.status(200).json({
-      message: "Leaderboard refresh completed successfully",
-    });
-  } catch (err) {
-    logger.error("Error triggering leaderboard refresh:", err);
-    res
-      .status(500)
-      .json({ error: "Failed to refresh leaderboard", details: err.message });
-  }
-});
+// app.post("/api/refresh-leaderboard", async (req, res) => {
+//   try {
+//     await refreshLeaderboardAggregation();
+//     res.status(200).json({
+//       message: "Leaderboard refresh completed successfully",
+//     });
+//   } catch (err) {
+//     logger.error("Error triggering leaderboard refresh:", err);
+//     res
+//       .status(500)
+//       .json({ error: "Failed to refresh leaderboard", details: err.message });
+//   }
+// });
 
 // =============================================================================
 // MATERIALIZED VIEW REFRESH FOR NEW/RETURNING USERS
@@ -1495,32 +1813,32 @@ async function refreshMaterializedViews() {
     // Unified MV Definitions
     const mvDefinitions = [
       // Legacy MVs
-      {
-        name: 'mv_user_first_activity',
-        query: `
-          CREATE MATERIALIZED VIEW IF NOT EXISTS mv_user_first_activity AS
-          SELECT 
-            user_id, 
-            MIN(session_start_at) as first_seen_at
-          FROM sessions
-          GROUP BY user_id;
-          CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_user_first_activity_user_id ON mv_user_first_activity(user_id);
-        `
-      },
-      {
-        name: 'mv_daily_new_returning_users',
-        query: `
-          CREATE MATERIALIZED VIEW IF NOT EXISTS mv_daily_new_returning_users AS
-          SELECT
-            TO_TIMESTAMP(s.session_start_at / 1000)::DATE AS activity_date,
-            COUNT(DISTINCT CASE WHEN s.session_start_at = f.first_seen_at THEN s.user_id END) as new_users,
-            COUNT(DISTINCT CASE WHEN s.session_start_at > f.first_seen_at THEN s.user_id END) as returning_users
-          FROM sessions s
-          JOIN mv_user_first_activity f ON s.user_id = f.user_id
-          GROUP BY 1;
-          CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_daily_new_returning_users_date ON mv_daily_new_returning_users(activity_date);
-        `
-      },
+      // {
+      //   name: 'mv_user_first_activity',
+      //   query: `
+      //     CREATE MATERIALIZED VIEW IF NOT EXISTS mv_user_first_activity AS
+      //     SELECT 
+      //       user_id, 
+      //       MIN(session_start_at) as first_seen_at
+      //     FROM sessions
+      //     GROUP BY user_id;
+      //     CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_user_first_activity_user_id ON mv_user_first_activity(user_id);
+      //   `
+      // },
+      // {
+      //   name: 'mv_daily_new_returning_users',
+      //   query: `
+      //     CREATE MATERIALIZED VIEW IF NOT EXISTS mv_daily_new_returning_users AS
+      //     SELECT
+      //       TO_TIMESTAMP(s.session_start_at / 1000)::DATE AS activity_date,
+      //       COUNT(DISTINCT CASE WHEN s.session_start_at = f.first_seen_at THEN s.user_id END) as new_users,
+      //       COUNT(DISTINCT CASE WHEN s.session_start_at > f.first_seen_at THEN s.user_id END) as returning_users
+      //     FROM sessions s
+      //     JOIN mv_user_first_activity f ON s.user_id = f.user_id
+      //     GROUP BY 1;
+      //     CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_daily_new_returning_users_date ON mv_daily_new_returning_users(activity_date);
+      //   `
+      // },
       // V2 MVs
       {
         name: 'mv_total_devices',
@@ -1563,44 +1881,44 @@ async function refreshMaterializedViews() {
           CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_os_density_name ON mv_os_density(os_name);
         `
       },
-      {
-        name: 'mv_session_duration',
-        query: `
-          CREATE MATERIALIZED VIEW IF NOT EXISTS mv_session_duration AS
-          SELECT 
-              COUNT(*) as total_sessions,
-              AVG(duration_seconds) as avg_duration,
-              MIN(duration_seconds) as min_duration,
-              MAX(duration_seconds) as max_duration
-          FROM sessions
-          WHERE duration_seconds IS NOT NULL;
-        `
-      },
-      {
-        name: 'mv_active_users',
-        query: `
-          CREATE MATERIALIZED VIEW IF NOT EXISTS mv_active_users AS
-          SELECT 
-              TO_TIMESTAMP(session_start_at / 1000)::DATE as activity_date,
-              COUNT(DISTINCT user_id) as active_users
-          FROM sessions
-          GROUP BY 1;
-          CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_active_users_date ON mv_active_users(activity_date);
-        `
-      },
-      {
-        name: 'mv_performance_metrics',
-        query: `
-          CREATE MATERIALIZED VIEW IF NOT EXISTS mv_performance_metrics AS
-          SELECT 
-              AVG(render_duration_ms) as avg_render_ms,
-              AVG(server_duration_ms) as avg_server_ms,
-              MAX(render_duration_ms) as max_render_ms,
-              MAX(server_duration_ms) as max_server_ms
-          FROM sessions
-          WHERE render_duration_ms IS NOT NULL OR server_duration_ms IS NOT NULL;
-        `
-      }
+      // {
+      //   name: 'mv_session_duration',
+      //   query: `
+      //     CREATE MATERIALIZED VIEW IF NOT EXISTS mv_session_duration AS
+      //     SELECT 
+      //         COUNT(*) as total_sessions,
+      //         AVG(duration_seconds) as avg_duration,
+      //         MIN(duration_seconds) as min_duration,
+      //         MAX(duration_seconds) as max_duration
+      //     FROM sessions
+      //     WHERE duration_seconds IS NOT NULL;
+      //   `
+      // },
+      // {
+      //   name: 'mv_active_users',
+      //   query: `
+      //     CREATE MATERIALIZED VIEW IF NOT EXISTS mv_active_users AS
+      //     SELECT 
+      //         TO_TIMESTAMP(session_start_at / 1000)::DATE as activity_date,
+      //         COUNT(DISTINCT user_id) as active_users
+      //     FROM sessions
+      //     GROUP BY 1;
+      //     CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_active_users_date ON mv_active_users(activity_date);
+      //   `
+      // },
+      // {
+      //   name: 'mv_performance_metrics',
+      //   query: `
+      //     CREATE MATERIALIZED VIEW IF NOT EXISTS mv_performance_metrics AS
+      //     SELECT 
+      //         AVG(render_duration_ms) as avg_render_ms,
+      //         AVG(server_duration_ms) as avg_server_ms,
+      //         MAX(render_duration_ms) as max_render_ms,
+      //         MAX(server_duration_ms) as max_server_ms
+      //     FROM sessions
+      //     WHERE render_duration_ms IS NOT NULL OR server_duration_ms IS NOT NULL;
+      //   `
+      // }
     ];
 
     // Ensure all MVs exist
@@ -1728,6 +2046,12 @@ async function startServer() {
     // Load configured event processors
     await loadEventProcessors.loadFromDatabase(pool);
 
+    // Log loaded processors for debugging
+    logger.info(`Loaded ${eventProcessors.length} event processors from database`);
+    eventProcessors.forEach((proc, index) => {
+      logger.info(`  Processor ${index}: table="${proc.tableName}", eventType="${proc.eventType}", fieldVerification="${proc.fieldVerification}"`);
+    });
+
     // Start Express server
     const server = app.listen(PORT, () => {
       logger.info(`Telemetry log processor service started on port ${PORT}`);
@@ -1737,7 +2061,7 @@ async function startServer() {
     logger.info('Running initial telemetry log processing on startup...');
     await processTelemetryLogs(`process_${Date.now()}`);
 
-    await refreshLeaderboardAggregation();
+    // await refreshLeaderboardAggregation();
 
     // Refresh materialized views on startup (non-blocking)
     logger.info('Running initial materialized views refresh on startup...');

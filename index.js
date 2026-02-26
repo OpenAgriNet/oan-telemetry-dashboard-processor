@@ -40,88 +40,88 @@ const pool = new Pool({
   // }
 });
 
-async function ensureVillagesSeeded() {
-  const client = await pool.connect();
-  try {
-    logger.info("Ensuring village_list table exists with expected columns...");
+// async function ensureVillagesSeeded() {
+//   const client = await pool.connect();
+//   try {
+//     logger.info("Ensuring village_list table exists with expected columns...");
 
-    // Create table with full schema if it does not exist (safe)
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS public.village_list (
-        village_code INTEGER PRIMARY KEY,
-        taluka_code INTEGER,
-        district_code INTEGER,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
+//     // Create table with full schema if it does not exist (safe)
+//     await client.query(`
+//       CREATE TABLE IF NOT EXISTS public.village_list (
+//         village_code INTEGER PRIMARY KEY,
+//         taluka_code INTEGER,
+//         district_code INTEGER,
+//         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+//       );
+//     `);
 
-    // Also ensure columns exist if older table was created with different schema
-    await client.query(`
-      ALTER TABLE public.village_list
-        ADD COLUMN IF NOT EXISTS taluka_code INTEGER,
-        ADD COLUMN IF NOT EXISTS district_code INTEGER,
-        ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
-    `);
+//     // Also ensure columns exist if older table was created with different schema
+//     await client.query(`
+//       ALTER TABLE public.village_list
+//         ADD COLUMN IF NOT EXISTS taluka_code INTEGER,
+//         ADD COLUMN IF NOT EXISTS district_code INTEGER,
+//         ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+//     `);
 
-    // check if table already has data
-    const { rows } = await client.query(
-      "SELECT COUNT(*)::bigint AS cnt FROM public.village_list"
-    );
-    const cnt = Number(rows[0].cnt || 0);
-    logger.info(`village_list row count = ${cnt}`);
+//     // check if table already has data
+//     const { rows } = await client.query(
+//       "SELECT COUNT(*)::bigint AS cnt FROM public.village_list"
+//     );
+//     const cnt = Number(rows[0].cnt || 0);
+//     logger.info(`village_list row count = ${cnt}`);
 
-    if (cnt > 0) {
-      logger.info("Villages table already seeded — skipping seeder.");
-      return;
-    }
+//     if (cnt > 0) {
+//       logger.info("Villages table already seeded — skipping seeder.");
+//       return;
+//     }
 
-    // spawn the existing seeder script (do not edit the seeder file)
-    logger.info(
-      "Villages table empty — running seeder script (seed_villages_stream.js). This may take some time..."
-    );
-    const seederPath = path.join(__dirname, "seed_villages_stream.js");
+//     // spawn the existing seeder script (do not edit the seeder file)
+//     logger.info(
+//       "Villages table empty — running seeder script (seed_villages_stream.js). This may take some time..."
+//     );
+//     const seederPath = path.join(__dirname, "seed_villages_stream.js");
 
-    const child = spawn(process.execPath, [seederPath], {
-      stdio: "inherit", // pipe seeder output to main stdout/stderr
-      env: process.env,
-      cwd: __dirname,
-    });
+//     const child = spawn(process.execPath, [seederPath], {
+//       stdio: "inherit", // pipe seeder output to main stdout/stderr
+//       env: process.env,
+//       cwd: __dirname,
+//     });
 
-    await new Promise((resolve, reject) => {
-      child.on("error", (err) => {
-        logger.error("Failed to start seeder process:", err);
-        reject(err);
-      });
-      child.on("exit", (code, signal) => {
-        if (code === 0) {
-          logger.info("Seeder completed successfully.");
-          resolve();
-        } else {
-          const msg = `Seeder exited with code ${code}${signal ? " signal " + signal : ""
-            }`;
-          logger.error(msg);
-          reject(new Error(msg));
-        }
-      });
-    });
-  } finally {
-    client.release();
-  }
-}
+//     await new Promise((resolve, reject) => {
+//       child.on("error", (err) => {
+//         logger.error("Failed to start seeder process:", err);
+//         reject(err);
+//       });
+//       child.on("exit", (code, signal) => {
+//         if (code === 0) {
+//           logger.info("Seeder completed successfully.");
+//           resolve();
+//         } else {
+//           const msg = `Seeder exited with code ${code}${signal ? " signal " + signal : ""
+//             }`;
+//           logger.error(msg);
+//           reject(new Error(msg));
+//         }
+//       });
+//     });
+//   } finally {
+//     client.release();
+//   }
+// }
 
 // call this at startup before starting the server
-(async () => {
-  try {
-    await ensureVillagesSeeded();
+// (async () => {
+//   try {
+    // await ensureVillagesSeeded();
     // continue with the rest of your startup:
     // await ensureTablesExist();
     // await loadEventProcessors.loadFromDatabase(pool);
     // start server...
-  } catch (err) {
-    logger.error("Startup aborted due to seeding failure:", err);
-    process.exit(1);
-  }
-})();
+//   } catch (err) {
+//     logger.error("Startup aborted due to seeding failure:", err);
+//     process.exit(1);
+//   }
+// })();
 
 const PORT = process.env.PORT || 3000;
 const BATCH_SIZE = process.env.BATCH_SIZE || 10;

@@ -975,17 +975,17 @@ BEGIN
     // await client.query(`
     //   ALTER TABLE questions ADD COLUMN IF NOT EXISTS session_id UUID REFERENCES sessions(id)
     // `);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_questions_session ON questions(session_id)`);
+    // await client.query(`CREATE INDEX IF NOT EXISTS idx_questions_session ON questions(session_id)`);
 
     // await client.query(`
     //   ALTER TABLE feedback ADD COLUMN IF NOT EXISTS session_id UUID REFERENCES sessions(id)
     // `);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_feedback_session ON feedback(session_id)`);
+    // await client.query(`CREATE INDEX IF NOT EXISTS idx_feedback_session ON feedback(session_id)`);
 
     // await client.query(`
     //   ALTER TABLE errorDetails ADD COLUMN IF NOT EXISTS session_id UUID REFERENCES sessions(id)
     // `);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_errordetails_session ON errorDetails(session_id)`);
+    // await client.query(`CREATE INDEX IF NOT EXISTS idx_errordetails_session ON errorDetails(session_id)`);
 
     logger.info("Database tables verified and created if needed (including V2 schema)");
   } catch (err) {

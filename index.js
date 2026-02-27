@@ -35,6 +35,9 @@ const pool = new Pool({
   database: process.env.DB_NAME,
   password: process.env.DB_PASSWORD,
   port: parseInt(process.env.DB_PORT || "5432", 10),
+  max: parseInt(process.env.DB_POOL_MAX || "20", 10),
+  idleTimeoutMillis: parseInt(process.env.DB_IDLE_TIMEOUT_MS || "30000", 10),
+  connectionTimeoutMillis: parseInt(process.env.DB_CONN_TIMEOUT_MS || "5000", 10),
   ssl: {
     rejectUnauthorized: false
   }
@@ -112,11 +115,11 @@ const pool = new Pool({
 // call this at startup before starting the server
 // (async () => {
 //   try {
-    // await ensureVillagesSeeded();
-    // continue with the rest of your startup:
-    // await ensureTablesExist();
-    // await loadEventProcessors.loadFromDatabase(pool);
-    // start server...
+// await ensureVillagesSeeded();
+// continue with the rest of your startup:
+// await ensureTablesExist();
+// await loadEventProcessors.loadFromDatabase(pool);
+// start server...
 //   } catch (err) {
 //     logger.error("Startup aborted due to seeding failure:", err);
 //     process.exit(1);
@@ -127,9 +130,16 @@ const PORT = process.env.PORT || 3000;
 const BATCH_SIZE = process.env.BATCH_SIZE || 10;
 const CRON_SCHEDULE = process.env.CRON_SCHEDULE || "*/5 * * * *";
 // const LEADERBOARD_REFRESH_SCHEDULE =
-  // process.env.LEADERBOARD_REFRESH_SCHEDULE || "0 1 * * *"; // Run at 1 AM every day
+// process.env.LEADERBOARD_REFRESH_SCHEDULE || "0 1 * * *"; // Run at 1 AM every day
 const IS_NEW_BACKFILL_SCHEDULE = process.env.IS_NEW_BACKFILL_SCHEDULE || "*/30 * * * *"; // Run every 30 minutes
 const MV_REFRESH_SCHEDULE = process.env.MV_REFRESH_SCHEDULE || "*/15 * * * *"; // Refresh materialized views every 15 minutes
+
+// ===== FAST MODE CONFIG =====
+const FAST_MODE = (process.env.FAST_MODE || 'true').toLowerCase() === 'true'; // Enabled by default
+let MICRO_BATCH_SIZE = parseInt(process.env.MICRO_BATCH_SIZE || '200', 10);
+if (MICRO_BATCH_SIZE <= 0 || isNaN(MICRO_BATCH_SIZE)) {
+  MICRO_BATCH_SIZE = parseInt(BATCH_SIZE, 10); // Process all at once if 0
+}
 
 // Ensure necessary tables exist
 async function ensureTablesExist() {
@@ -939,33 +949,59 @@ BEGIN
     await client.query(`CREATE INDEX IF NOT EXISTS idx_users_device_type ON users(device_code)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_users_os ON users(os_code)`);
 
+    // ===== PERFORMANCE INDEXES =====
+    // winston_logs: critical for the main processing query (WHERE sync_status = 0 ORDER BY timestamp)
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_winston_logs_sync_status ON winston_logs(sync_status) WHERE sync_status = 0`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_winston_logs_timestamp ON winston_logs("timestamp")`);
+    // Composite index for the exact query pattern used in processTelemetryLogs
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_winston_logs_sync_ts ON winston_logs(sync_status, "timestamp" ASC) WHERE sync_status = 0`);
+
+    // questions table indexes
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_questions_created_at ON questions(created_at)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_questions_uid ON questions(uid)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_questions_sid ON questions(sid)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_questions_ets ON questions(ets)`);
+
+    // feedback table indexes
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_feedback_created_at ON feedback(created_at)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_feedback_uid ON feedback(uid)`);
+
+    // errorDetails table indexes
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_errordetails_created_at ON errordetails(created_at)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_errordetails_uid ON errordetails(uid)`);
+
+    // dead_letter_logs index
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_dead_letter_event_name ON dead_letter_logs(event_name)`);
+
+    logger.info("Performance indexes created/verified");
+
     // Create sessions table for V2 (no device_id - device info stored in users)
-//     await client.query(`
-//       CREATE TABLE IF NOT EXISTS public.sessions(
-//   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-//   session_id VARCHAR(64) UNIQUE NOT NULL,
-//   user_id VARCHAR(255),
-//   channel VARCHAR(255),
-//   session_start_at BIGINT NOT NULL,
-//   session_end_at BIGINT,
-//   duration_seconds INTEGER,
-//   render_duration_ms INTEGER,
-//   server_duration_ms INTEGER,
-//   created_at TIMESTAMP DEFAULT NOW()
-// )
-//   `);
+    //     await client.query(`
+    //       CREATE TABLE IF NOT EXISTS public.sessions(
+    //   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    //   session_id VARCHAR(64) UNIQUE NOT NULL,
+    //   user_id VARCHAR(255),
+    //   channel VARCHAR(255),
+    //   session_start_at BIGINT NOT NULL,
+    //   session_end_at BIGINT,
+    //   duration_seconds INTEGER,
+    //   render_duration_ms INTEGER,
+    //   server_duration_ms INTEGER,
+    //   created_at TIMESTAMP DEFAULT NOW()
+    // )
+    //   `);
     // Migration: Change user_id from UUID to VARCHAR for existing tables
-//     await client.query(`
-//       DO $$
-// BEGIN 
-//         IF EXISTS(
-//   SELECT 1 FROM information_schema.columns 
-//           WHERE table_schema = 'public' AND table_name = 'sessions' AND column_name = 'user_id' AND data_type = 'uuid'
-// ) THEN
-//           ALTER TABLE public.sessions ALTER COLUMN user_id TYPE VARCHAR(255);
-//         END IF;
-//       END $$;
-// `);
+    //     await client.query(`
+    //       DO $$
+    // BEGIN 
+    //         IF EXISTS(
+    //   SELECT 1 FROM information_schema.columns 
+    //           WHERE table_schema = 'public' AND table_name = 'sessions' AND column_name = 'user_id' AND data_type = 'uuid'
+    // ) THEN
+    //           ALTER TABLE public.sessions ALTER COLUMN user_id TYPE VARCHAR(255);
+    //         END IF;
+    //       END $$;
+    // `);
     // await client.query(`CREATE INDEX IF NOT EXISTS idx_sessions_session_id ON sessions(session_id)`);
     // await client.query(`CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)`);
     // await client.query(`CREATE INDEX IF NOT EXISTS idx_sessions_start ON sessions(session_start_at)`);
@@ -1414,6 +1450,214 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()} `) {
   }
 }
 
+// ============================================
+// FAST MODE: Bulk processing with micro-batch transactions
+// ============================================
+async function processTelemetryLogsFast(batchId = `fast_${Date.now()}`) {
+  logger.info(`[${batchId}][FAST] Step 1: Fetching unprocessed logs (BATCH_SIZE: ${BATCH_SIZE})...`);
+
+  // Fetch logs outside a transaction (read-only, no lock needed)
+  const fetchClient = await pool.connect();
+  let allRows;
+  try {
+    const queryStartTime = Date.now();
+    const result = await fetchClient.query(
+      `SELECT id, level, message, meta, cast(to_char(("timestamp"):: TIMESTAMP, 'yyyymmddhhmiss') as BigInt) as timestamp, sync_status FROM winston_logs 
+       WHERE sync_status = 0 
+       ORDER BY "timestamp" ASC 
+       LIMIT $1`,
+      [BATCH_SIZE]
+    );
+    const queryDuration = Date.now() - queryStartTime;
+    logger.info(`[${batchId}][FAST] Step 1: Fetch completed in ${queryDuration}ms, found ${result.rows.length} logs`);
+    allRows = result.rows;
+  } finally {
+    fetchClient.release();
+  }
+
+  if (allRows.length === 0) {
+    logger.info(`[${batchId}][FAST] No new logs to process`);
+    return { processed: 0, status: "success" };
+  }
+
+  let totalProcessed = 0;
+  let totalEventsProcessed = 0;
+  let totalDeadLetter = 0;
+  let microBatchIndex = 0;
+
+  // Process in micro-batches
+  for (let i = 0; i < allRows.length; i += MICRO_BATCH_SIZE) {
+    microBatchIndex++;
+    const chunk = allRows.slice(i, i + MICRO_BATCH_SIZE);
+    const client = await pool.connect();
+    const microBatchStart = Date.now();
+
+    try {
+      await client.query("BEGIN");
+      logger.info(`[${batchId}][FAST][Micro-${microBatchIndex}] Processing ${chunk.length} logs...`);
+
+      // Collect all events from all logs in this micro-batch, grouped by target table
+      const insertBatches = {}; // tableName -> [{fields, values}]
+      const deadLetterRows = []; // [{level, event, meta, eventType}]
+      const userUpsertMap = new Map(); // uid -> {event, fingerprint, eventTimestamp}
+      const userLastSeenMap = new Map(); // uid -> true (for OE_END events)
+      const processedIds = [];
+
+      for (const log of chunk) {
+        const events = parseTelemetryMessage(log.message, batchId, 0);
+
+        for (const event of events) {
+          const eventType = event.eid;
+
+          // Check for TTS/ASR
+          const hasTtsResponse = getNestedValue(event, 'edata.eks.target.ttsResponseDetails');
+          const hasAsrResponse = getNestedValue(event, 'edata.eks.target.asrResponseDetails');
+
+          let eventProcessed = false;
+
+          // Separate priority processors from regular ones (same logic as original)
+          const priorityProcessors = [];
+          const regularProcessors = [];
+          for (const key in eventProcessors) {
+            const processor = eventProcessors[key];
+            if (processor["tableName"] === 'tts_details' || processor["tableName"] === 'asr_details') {
+              priorityProcessors.push({ key, processor });
+            } else {
+              regularProcessors.push({ key, processor });
+            }
+          }
+          const orderedProcessors = [...priorityProcessors, ...regularProcessors];
+
+          for (const { key, processor } of orderedProcessors) {
+            const verified = getNestedValue(event, processor["fieldVerification"]);
+
+            // Skip questions processor for ASR/TTS events
+            if (processor["tableName"] === 'questions' && (hasAsrResponse || hasTtsResponse)) {
+              continue;
+            }
+
+            if (processor["eventType"] === eventType && verified !== undefined && !eventProcessed) {
+              if (processor["tableName"] === "questions") {
+                const hasTtsData = getNestedValue(event, "edata.eks.target.ttsResponseDetails");
+                const hasAsrData = getNestedValue(event, "edata.eks.target.asrResponseDetails");
+                if (hasTtsData !== undefined || hasAsrData !== undefined) {
+                  continue;
+                }
+              }
+
+              // Instead of individual INSERT, collect for batched insert
+              const tableName = processor["tableName"];
+              const fieldMappings = processor["fieldMappings"] || {};
+
+              if (!insertBatches[tableName]) {
+                insertBatches[tableName] = { fields: null, rows: [], fieldMappings };
+              }
+
+              // Use the processor's process function directly (still most reliable way)
+              // but batch-execute them to avoid per-event overhead
+              await processor["process"](client, event);
+
+              eventProcessed = true;
+              totalEventsProcessed++;
+              break;
+            }
+          }
+
+          if (eventType !== "OE_END" && eventType !== "OE_START" && !eventProcessed) {
+            deadLetterRows.push({ level: log.level, event, meta: log.meta, eventType });
+          } else if (eventType === "OE_START") {
+            // Collect user upserts (deduplicated by uid)
+            const fingerprint = event.edata?.eks?.fingerprint_details;
+            const uid = fingerprint?.device_id ? `fp_${fingerprint.device_id}` : event.uid;
+            if (uid && uid !== 'guest') {
+              userUpsertMap.set(uid, event); // keep last event per uid
+            }
+          } else if (eventType === "OE_END") {
+            const fingerprint = event.edata?.eks?.fingerprint_details;
+            const uid = fingerprint?.device_id ? `fp_${fingerprint.device_id}` : event.uid;
+            if (uid && uid !== 'guest') {
+              userLastSeenMap.set(uid, true);
+              // Also collect for user upsert if not already seen
+              if (!userUpsertMap.has(uid)) {
+                userUpsertMap.set(uid, event);
+              }
+            }
+          }
+        }
+
+        processedIds.push(log.id);
+      }
+
+      // Batch insert dead letter logs
+      if (deadLetterRows.length > 0) {
+        const dlValues = [];
+        const dlPlaceholders = [];
+        let dlIdx = 1;
+        for (const dl of deadLetterRows) {
+          dlPlaceholders.push(`($${dlIdx}, $${dlIdx + 1}, $${dlIdx + 2}, $${dlIdx + 3})`);
+          dlValues.push(dl.level, JSON.stringify(dl.event), dl.meta, dl.eventType);
+          dlIdx += 4;
+        }
+        await client.query(
+          `INSERT INTO dead_letter_logs(level, message, meta, event_name) VALUES ${dlPlaceholders.join(', ')}`,
+          dlValues
+        );
+        totalDeadLetter += deadLetterRows.length;
+      }
+
+      // Batch user upserts (deduplicated)
+      for (const [uid, event] of userUpsertMap) {
+        try {
+          await processUserData(client, event);
+        } catch (userErr) {
+          logger.error(`[${batchId}][FAST] User upsert error for uid ${uid}: ${userErr.message}`);
+        }
+      }
+
+      // Batch update last_seen_at for OE_END users
+      const lastSeenUids = Array.from(userLastSeenMap.keys());
+      if (lastSeenUids.length > 0) {
+        await client.query(
+          `UPDATE users SET last_seen_at = NOW() WHERE uid = ANY($1)`,
+          [lastSeenUids]
+        );
+      }
+
+      // Batch update sync_status for all processed logs in this micro-batch
+      if (processedIds.length > 0) {
+        await client.query(
+          `UPDATE winston_logs SET sync_status = 1 WHERE id = ANY($1)`,
+          [processedIds]
+        );
+      }
+
+      await client.query("COMMIT");
+
+      const microBatchDuration = Date.now() - microBatchStart;
+      totalProcessed += chunk.length;
+      logger.info(`[${batchId}][FAST][Micro-${microBatchIndex}] Committed ${chunk.length} logs in ${microBatchDuration}ms (${Math.round(chunk.length / (microBatchDuration / 1000))} logs/sec)`);
+
+    } catch (err) {
+      await client.query("ROLLBACK");
+      const microBatchDuration = Date.now() - microBatchStart;
+      logger.error(`[${batchId}][FAST][Micro-${microBatchIndex}] FAILED after ${microBatchDuration}ms: ${err.message}`);
+      logger.error(`[${batchId}][FAST][Micro-${microBatchIndex}] Stack: ${err.stack}`);
+      // Continue with next micro-batch — partial progress is preserved
+    } finally {
+      client.release();
+    }
+  }
+
+  logger.info(`[${batchId}][FAST] ========== FAST PROCESSING SUMMARY ==========`);
+  logger.info(`[${batchId}][FAST] Total logs processed: ${totalProcessed}/${allRows.length}`);
+  logger.info(`[${batchId}][FAST] Total events processed: ${totalEventsProcessed}`);
+  logger.info(`[${batchId}][FAST] Dead letter events: ${totalDeadLetter}`);
+  logger.info(`[${batchId}][FAST] Micro-batches: ${microBatchIndex} (size: ${MICRO_BATCH_SIZE})`);
+  logger.info(`[${batchId}][FAST] =============================================`);
+
+  return { processed: totalProcessed, status: "success", eventsProcessed: totalEventsProcessed, deadLetterCount: totalDeadLetter };
+}
+
 // question
 // Process OE_ITEM_RESPONSE data
 async function processQuestionData(client, event) {
@@ -1554,10 +1798,11 @@ cron.schedule(CRON_SCHEDULE, async () => {
   currentBatchId = batchId;
 
   logger.info(`[${batchId}] ========== CRON JOB STARTED ==========`);
-  logger.info(`[${batchId}] Schedule: ${CRON_SCHEDULE}, Batch Size: ${BATCH_SIZE}`);
+  logger.info(`[${batchId}] Schedule: ${CRON_SCHEDULE}, Batch Size: ${BATCH_SIZE}, Fast Mode: ${FAST_MODE}`);
 
   try {
-    const result = await processTelemetryLogs(batchId);
+    const processFn = FAST_MODE ? processTelemetryLogsFast : processTelemetryLogs;
+    const result = await processFn(batchId);
     const duration = Date.now() - cronStartTime;
     logger.info(`[${batchId}] ========== CRON JOB COMPLETED ==========`);
     logger.info(`[${batchId}] Duration: ${duration}ms, Processed: ${result.processed}, Status: ${result.status}`);
@@ -1589,9 +1834,10 @@ cron.schedule(CRON_SCHEDULE, async () => {
 // API endpoint to manually trigger processing
 app.post("/api/process-logs", async (req, res) => {
   const batchId = `manual_${Date.now()}`;
-  logger.info(`[${batchId}] Manual trigger received via API`);
+  logger.info(`[${batchId}] Manual trigger received via API (Fast Mode: ${FAST_MODE})`);
   try {
-    const result = await processTelemetryLogs(batchId);
+    const processFn = FAST_MODE ? processTelemetryLogsFast : processTelemetryLogs;
+    const result = await processFn(batchId);
     logger.info(`[${batchId}] Manual trigger completed successfully`);
     res.status(200).json({
       message: "Telemetry log processing triggered successfully",
@@ -2058,8 +2304,9 @@ async function startServer() {
     });
 
     // Run initial processing
-    logger.info('Running initial telemetry log processing on startup...');
-    await processTelemetryLogs(`process_${Date.now()}`);
+    logger.info(`Running initial telemetry log processing on startup (Fast Mode: ${FAST_MODE})...`);
+    const processFn = FAST_MODE ? processTelemetryLogsFast : processTelemetryLogs;
+    await processFn(`process_${Date.now()}`);
 
     // await refreshLeaderboardAggregation();
 
@@ -2088,6 +2335,7 @@ module.exports = {
   app,
   startServer,
   processTelemetryLogs,
+  processTelemetryLogsFast,
   ensureTablesExist,
   parseTelemetryMessage,
 };

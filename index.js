@@ -38,9 +38,7 @@ const pool = new Pool({
   max: parseInt(process.env.DB_POOL_MAX || "20", 10),
   idleTimeoutMillis: parseInt(process.env.DB_IDLE_TIMEOUT_MS || "30000", 10),
   connectionTimeoutMillis: parseInt(process.env.DB_CONN_TIMEOUT_MS || "5000", 10),
-  ssl: {
-    rejectUnauthorized: false
-  }
+  ssl: process.env.DB_SSL === "true" ? { rejectUnauthorized: false } : false
 });
 
 // async function ensureVillagesSeeded() {
@@ -867,6 +865,56 @@ event_type = 'OE_ITEM_RESPONSE',
 field_verification = 'edata.eks.target.networkApiDetails',
   updated_at = NOW()
       WHERE table_name = 'network_api_table';
+`);
+
+    // Create llm_telemetry table for LLM API usage telemetry
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.llm_telemetry(
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      session_id VARCHAR(255) NOT NULL,
+      uid VARCHAR(255),
+      total_input_tokens INTEGER NOT NULL DEFAULT 0,
+      total_output_tokens INTEGER NOT NULL DEFAULT 0,
+      tools_used JSONB NOT NULL DEFAULT '[]',
+      total_latency_seconds NUMERIC,
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+    `);
+
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_llm_telemetry_session_id ON public.llm_telemetry(session_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_llm_telemetry_uid ON public.llm_telemetry(uid)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_llm_telemetry_created_at ON public.llm_telemetry(created_at)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_llm_telemetry_tools ON public.llm_telemetry USING GIN(tools_used)`);
+
+    // Insert LLM telemetry event processor
+    await client.query(`
+      INSERT INTO public.event_processors(event_type, table_name, field_mappings, field_verification)
+VALUES
+  ('OE_ITEM_RESPONSE', 'llm_telemetry', '{
+    "session_id": "edata.eks.target.llmTelemetryDetails.session_id",
+    "uid": "uid",
+    "total_input_tokens": "edata.eks.target.llmTelemetryDetails.total_input_tokens",
+    "total_output_tokens": "edata.eks.target.llmTelemetryDetails.total_output_tokens",
+    "tools_used": "edata.eks.target.llmTelemetryDetails.tools_used",
+    "total_latency_seconds": "edata.eks.target.llmTelemetryDetails.total_latency_seconds"
+  }','edata.eks.target.llmTelemetryDetails')
+      ON CONFLICT DO NOTHING;
+`);
+    await client.query(`
+      UPDATE public.event_processors
+SET
+  event_type = 'OE_ITEM_RESPONSE',
+  field_mappings = '{
+    "session_id": "edata.eks.target.llmTelemetryDetails.session_id",
+    "uid": "uid",
+    "total_input_tokens": "edata.eks.target.llmTelemetryDetails.total_input_tokens",
+    "total_output_tokens": "edata.eks.target.llmTelemetryDetails.total_output_tokens",
+    "tools_used": "edata.eks.target.llmTelemetryDetails.tools_used",
+    "total_latency_seconds": "edata.eks.target.llmTelemetryDetails.total_latency_seconds"
+  }',
+  field_verification = 'edata.eks.target.llmTelemetryDetails',
+  updated_at = NOW()
+      WHERE table_name = 'llm_telemetry';
 `);
 
 

@@ -38,12 +38,12 @@ async function loadFromDatabase(pool) {
     //eventProcessors = [];
     // Register each processor from database
     for (const row of result.rows) {
-      console.log(row);
+      // console.log(row);
       registerProcessor(row.id, row.event_type, row.table_name, row.field_mappings, row.field_verification);
+      logger.debug('Event processor loaded', { id: row.id });
     }
 
-    console.log(eventProcessors);
-
+    // console.log(eventProcessors);
     logger.info(`Loaded ${result.rows.length} event processors from database`);
   } catch (err) {
     console.error(err);
@@ -234,7 +234,9 @@ function registerProcessor(id, eventType, tableName, fieldMappings, fieldVerific
       const eventMid = event?.mid || 'unknown';
       const eventId = event?.edata?.eks?.target?.id || event?.object?.id || 'unknown';
       logger.error(`Error processing ${eventType} event (mid: ${eventMid}, id: ${eventId}): ${err.message}`);
-      logger.error(`Skipping bad record. Event data: ${JSON.stringify(event).substring(0, 500)}...`);
+      const safeEventMeta = { eid: event?.eid, ets: event?.ets };
+      logger.error(`Skipping bad record. Event meta:  ${JSON.stringify(safeEventMeta)}`);
+      // logger.error(`Skipping bad record. Event data: ${JSON.stringify(event).substring(0, 500)}...`);
       // Don't throw - allow batch to continue processing other events
       return { success: false, skipped: true, error: err.message };
     }

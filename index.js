@@ -679,8 +679,9 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
         const eventType = event.eid;
         const eventUid = event.uid || "unknown";
         const eventMid = event.mid || "unknown";
+        const maskedId =  eventUid ? `${eventUid.substring(0, 4)}***` : 'unknown';  
         logger.debug(
-          `[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}/${events.length}] Processing event type: ${eventType}, uid: ${eventUid}, mid: ${eventMid}`,
+          `[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}/${events.length}] Processing event type: ${eventType}, uid: ${maskedId}, mid: ${eventMid}`,
         );
 
         let eventProcessed = false;
@@ -757,8 +758,9 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
           logger.warn(
             `[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] mid: ${eventMid} - No processor matched for event type: ${eventType} - sending to dead letter queue`,
           );
+          const maskedId = eventUid ? `${eventUid.substring(0, 4)}***` : 'unknown';  
           logger.debug(
-            `[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] mid: ${eventMid} - Dead letter event uid: ${eventUid}, channel: ${event.channel || "unknown"}`,
+            `[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] mid: ${eventMid} - Dead letter event uid: ${maskedId}, channel: ${event.channel || "unknown"}`,
           );
 
           await client.query(

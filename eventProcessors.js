@@ -6,9 +6,90 @@
 
 const logger = require('./logger');
 const _ = require('lodash');
+const { escapeIdentifier } = require('pg');
 
 // Event processor registry
 let eventProcessors = [];
+const IDENTIFIER_REGEX = /^[a-z_][a-z0-9_]{0,62}$/;
+
+class ProcessorConfigValidationError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'ProcessorConfigValidationError';
+    this.code = 'INVALID_PROCESSOR_CONFIG';
+    this.statusCode = 400;
+  }
+}
+
+function isProcessorConfigValidationError(err) {
+  return err instanceof ProcessorConfigValidationError || err?.code === 'INVALID_PROCESSOR_CONFIG';
+}
+
+function normalizeFieldMappings(fieldMappings) {
+  if (!fieldMappings || typeof fieldMappings !== 'object' || Array.isArray(fieldMappings)) {
+    throw new ProcessorConfigValidationError('fieldMappings must be a non-empty object');
+  }
+
+  return fieldMappings;
+}
+
+function resolveIdentifier(identifier, identifierType = 'identifier') {
+  if (typeof identifier !== 'string') {
+    throw new ProcessorConfigValidationError(`${identifierType} must be a string`);
+  }
+
+  const canonicalName = identifier.trim().toLowerCase();
+  if (!IDENTIFIER_REGEX.test(canonicalName)) {
+    throw new ProcessorConfigValidationError(`Invalid ${identifierType}: ${identifier}`);
+  }
+
+  return {
+    canonicalName,
+    escapedName: escapeIdentifier(canonicalName),
+  };
+}
+
+function buildProcessorSqlConfig(tableName, fieldMappings) {
+  const normalizedFieldMappings = normalizeFieldMappings(fieldMappings);
+  const tableIdentifier = resolveIdentifier(tableName, 'table name');
+  const seenColumns = new Map();
+  const columns = Object.entries(normalizedFieldMappings).map(([field, path]) => {
+    const columnIdentifier = resolveIdentifier(field, 'column name');
+    const duplicateSourceField = seenColumns.get(columnIdentifier.canonicalName);
+
+    if (duplicateSourceField) {
+      throw new ProcessorConfigValidationError(
+        `Duplicate column name after normalization: ${field} conflicts with ${duplicateSourceField}`
+      );
+    }
+
+    seenColumns.set(columnIdentifier.canonicalName, field);
+
+    return {
+      sourceField: field,
+      mappingPath: path,
+      normalizedField: columnIdentifier.canonicalName,
+      escapedField: columnIdentifier.escapedName,
+    };
+  });
+
+  if (columns.length === 0) {
+    throw new ProcessorConfigValidationError('fieldMappings must include at least one field');
+  }
+
+  const placeholders = columns.map((_, index) => `$${index + 1}`).join(', ');
+  const escapedColumns = columns.map((column) => column.escapedField).join(', ');
+
+  return {
+    canonicalTableName: tableIdentifier.canonicalName,
+    escapedTableName: tableIdentifier.escapedName,
+    columns,
+    insertQuery: `
+        INSERT INTO public.${tableIdentifier.escapedName} (${escapedColumns})
+        VALUES (${placeholders})
+      `,
+  };
+}
 
 /**
  * Get a nested property from an object using dot notation path
@@ -34,19 +115,30 @@ async function loadFromDatabase(pool) {
     );
 
     // Clear existing processors
-    Object.keys(eventProcessors).forEach(key => delete eventProcessors[key]);
-    //eventProcessors = [];
+    eventProcessors.length = 0;
     // Register each processor from database
     for (const row of result.rows) {
-      console.log(row);
-      registerProcessor(row.id, row.event_type, row.table_name, row.field_mappings, row.field_verification);
+      try {
+        registerProcessor(
+          row.id,
+          row.event_type,
+          row.table_name,
+          row.field_mappings,
+          row.field_verification
+        );
+      } catch (err) {
+        if (isProcessorConfigValidationError(err)) {
+          logger.error(
+            `Skipping invalid event processor configuration (id: ${row.id}, event_type: ${row.event_type}, table_name: ${row.table_name}): ${err.message}`
+          );
+          continue;
+        }
+        throw err;
+      }
     }
-
-    console.log(eventProcessors);
 
     logger.info(`Loaded ${result.rows.length} event processors from database`);
   } catch (err) {
-    console.error(err);
     logger.error('Error loading event processors from database:', err);
     throw err;
   } finally {
@@ -65,8 +157,24 @@ async function loadFromDatabase(pool) {
 async function registerEventProcessor(eventType, tableName, fieldMappings, fieldVerification, pool) {
   const client = await pool.connect();
   try {
+    const sqlConfig = buildProcessorSqlConfig(tableName, fieldMappings);
+
+    const collisionCheck = await client.query(
+      `SELECT id, event_type, table_name
+       FROM event_processors
+       WHERE LOWER(TRIM(table_name)) = $1`,
+      [sqlConfig.canonicalTableName]
+    );
+
+    const hasCanonicalCollision = collisionCheck.rows.some((row) => row.table_name !== sqlConfig.canonicalTableName);
+    if (hasCanonicalCollision) {
+      throw new ProcessorConfigValidationError(
+        `Table name ${tableName} conflicts with an existing processor after canonicalization`
+      );
+    }
+
     // Check if the target table exists and create it if not
-    await ensureTableExists(client, tableName, fieldMappings);
+    await ensureTableExists(client, tableName, fieldMappings, sqlConfig);
 
     // Insert or update event processor configuration
     await client.query(
@@ -74,14 +182,14 @@ async function registerEventProcessor(eventType, tableName, fieldMappings, field
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (table_name)
        DO UPDATE SET event_type = $1, field_mappings = $3, field_verification = $4, updated_at = NOW()`,
-      [eventType, tableName, JSON.stringify(fieldMappings), fieldVerification]
+      [eventType, sqlConfig.canonicalTableName, JSON.stringify(fieldMappings), fieldVerification]
     );
 
     // Register the processor in memory
-    registerProcessor(null, eventType, tableName, fieldMappings, fieldVerification);
+    registerProcessor(null, eventType, sqlConfig.canonicalTableName, fieldMappings, fieldVerification, sqlConfig);
 
     logger.info(`Registered event processor for event type: ${eventType}`);
-    return { success: true };
+    return { success: true, tableName: sqlConfig.canonicalTableName };
   } catch (err) {
     logger.error(`Error registering event processor for ${eventType}:`, err);
     throw err;
@@ -97,8 +205,10 @@ async function registerEventProcessor(eventType, tableName, fieldMappings, field
  * @param {String} tableName - Table name to create
  * @param {Object} fieldMappings - Field mappings that define columns
  */
-async function ensureTableExists(client, tableName, fieldMappings) {
+async function ensureTableExists(client, tableName, fieldMappings, sqlConfig = null) {
   try {
+    const resolvedSqlConfig = sqlConfig || buildProcessorSqlConfig(tableName, fieldMappings);
+
     // Check if table exists
     const tableExists = await client.query(`
       SELECT EXISTS (
@@ -106,27 +216,27 @@ async function ensureTableExists(client, tableName, fieldMappings) {
         WHERE table_schema = 'public' 
         AND table_name = $1
       )`,
-      [tableName]
+      [resolvedSqlConfig.canonicalTableName]
     );
 
     if (!tableExists.rows[0].exists) {
       // Construct create table SQL
       let createTableSQL = `
-        CREATE TABLE IF NOT EXISTS public.${tableName} (
+        CREATE TABLE IF NOT EXISTS public.${resolvedSqlConfig.escapedTableName} (
           id SERIAL PRIMARY KEY,
       `;
 
       // Add columns for each field in the mapping
-      Object.keys(fieldMappings).forEach(field => {
+      resolvedSqlConfig.columns.forEach(({ normalizedField, escapedField }) => {
         // Determine column type based on field name hints
         let columnType = 'TEXT';
-        if (field.toLowerCase().includes('id')) columnType = 'VARCHAR';
-        if (field.toLowerCase().includes('details')) columnType = 'JSONB';
-        if (field.toLowerCase().includes('ets')) columnType = 'BIGINT';
-        if (field.toLowerCase().includes('text') && field !== 'answerText') columnType = 'TEXT';
-        if (field.toLowerCase() === 'answertext') columnType = 'JSONB';
+        if (normalizedField.includes('id')) columnType = 'VARCHAR';
+        if (normalizedField.includes('details')) columnType = 'JSONB';
+        if (normalizedField.includes('ets')) columnType = 'BIGINT';
+        if (normalizedField.includes('text') && normalizedField !== 'answertext') columnType = 'TEXT';
+        if (normalizedField === 'answertext') columnType = 'JSONB';
 
-        createTableSQL += `${field.toLowerCase()} ${columnType},\n`;
+        createTableSQL += `${escapedField} ${columnType},\n`;
       });
 
       // Add created_at timestamp
@@ -134,7 +244,7 @@ async function ensureTableExists(client, tableName, fieldMappings) {
 
       // Create the table
       await client.query(createTableSQL);
-      logger.info(`Created new table: ${tableName}`);
+      logger.info(`Created new table: ${resolvedSqlConfig.canonicalTableName}`);
     }
   } catch (err) {
     logger.error(`Error ensuring table exists for ${tableName}:`, err);
@@ -149,19 +259,17 @@ async function ensureTableExists(client, tableName, fieldMappings) {
  * @param {String} tableName - The target table name
  * @param {Object} fieldMappings - Mapping of table columns to event data paths
  */
-function registerProcessor(id, eventType, tableName, fieldMappings, fieldVerification) {
+function registerProcessor(id, eventType, tableName, fieldMappings, fieldVerification, sqlConfig = null) {
+  const resolvedSqlConfig = sqlConfig || buildProcessorSqlConfig(tableName, fieldMappings);
   let eventProcessorsData = {};
   eventProcessorsData["id"] = id;
   eventProcessorsData["eventType"] = eventType;
-  eventProcessorsData["tableName"] = tableName;
+  eventProcessorsData["tableName"] = resolvedSqlConfig.canonicalTableName;
   eventProcessorsData["fieldVerification"] = fieldVerification;
   eventProcessorsData["process"] = async (client, event) => {
     try {
       // Extract field values using mappings
-      const fields = [];
       const values = [];
-      const placeholders = [];
-      let paramIndex = 1;
 
       function resolveValueForField(fieldName, mappingPath) {
         const direct = getNestedValue(event, mappingPath);
@@ -178,24 +286,23 @@ function registerProcessor(id, eventType, tableName, fieldMappings, fieldVerific
         return null;
       }
 
-      Object.entries(fieldMappings).forEach(([field, path]) => {
-        fields.push(field.toLowerCase());
-        let value = resolveValueForField(field.toLowerCase(), path);
+      resolvedSqlConfig.columns.forEach(({ normalizedField, mappingPath }) => {
+        let value = resolveValueForField(normalizedField, mappingPath);
 
         // Handle telemetry context fields that are not in individual events
         // but are part of the telemetry configuration
         const telemetryContextFields = ['mobile', 'username', 'email', 'role', 'farmer_id'];
         const locationFields = ['registered_location', 'device_location', 'agristack_location'];
 
-        if (telemetryContextFields.includes(path) || telemetryContextFields.includes(field.toLowerCase())) {
+        if (telemetryContextFields.includes(mappingPath) || telemetryContextFields.includes(normalizedField)) {
           // Try nested target context first
-          value = resolveValueForField(field.toLowerCase(), path);
+          value = resolveValueForField(normalizedField, mappingPath);
         }
         // Handle location JSON formation
-        else if (locationFields.includes(field.toLowerCase())) {
+        else if (locationFields.includes(normalizedField)) {
           // Construct JSON object for location data from individual district/village/taluka fields
           // The telemetry sends: registered_location_district, registered_location_village, registered_location_taluka
-          const locationPrefix = field.toLowerCase(); // e.g., "registered_location"
+          const locationPrefix = normalizedField; // e.g., "registered_location"
           const districtPath = `${locationPrefix}_district`;
           const villagePath = `${locationPrefix}_village`;
           const talukaPath = `${locationPrefix}_taluka`;
@@ -214,21 +321,13 @@ function registerProcessor(id, eventType, tableName, fieldMappings, fieldVerific
         }
 
         // Ensure JSONB fields are sent as proper JSON values in SQL (pg driver handles JS objects)
-        const isJsonField = ['registered_location', 'device_location', 'agristack_location', 'groupdetails', 'answertext'].includes(field.toLowerCase());
+        const isJsonField = ['registered_location', 'device_location', 'agristack_location', 'groupdetails', 'answertext'].includes(normalizedField);
         values.push(isJsonField ? (value === null ? null : value) : ((typeof value === 'object' && value !== null) ? JSON.stringify(value) : value));
-        placeholders.push(`$${paramIndex++}`);
       });
 
-
-      // Construct the SQL query
-      const query = `
-        INSERT INTO ${tableName} (${fields.join(', ')})
-        VALUES (${placeholders.join(', ')})
-      `;
-
       // Execute the query
-      await client.query(query, values);
-      logger.debug(`Processed ${eventType} event into ${tableName} table`);
+      await client.query(resolvedSqlConfig.insertQuery, values);
+      logger.debug(`Processed ${eventType} event into ${resolvedSqlConfig.canonicalTableName} table`);
     } catch (err) {
       // Log the error with event details but skip this record instead of failing the batch
       const eventMid = event?.mid || 'unknown';
@@ -245,6 +344,8 @@ function registerProcessor(id, eventType, tableName, fieldMappings, fieldVerific
 module.exports = {
   eventProcessors,
   getNestedValue,
+  buildProcessorSqlConfig,
+  isProcessorConfigValidationError,
   loadEventProcessors: {
     loadFromDatabase,
     registerEventProcessor
@@ -253,6 +354,10 @@ module.exports = {
   _testing: {
     getNestedValue,
     registerProcessor,
-    ensureTableExists
+    ensureTableExists,
+    buildProcessorSqlConfig,
+    resolveIdentifier,
+    isProcessorConfigValidationError,
+    ProcessorConfigValidationError
   }
 };

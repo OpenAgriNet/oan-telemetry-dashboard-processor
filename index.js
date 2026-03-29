@@ -19,6 +19,8 @@ const {
   eventProcessors,
   loadEventProcessors,
   getNestedValue,
+  buildProcessorSqlConfig,
+  isProcessorConfigValidationError,
 } = require("./eventProcessors");
 const { forEach } = require("lodash");
 
@@ -1062,6 +1064,17 @@ app.get("/api/event-processors", (req, res) => {
   res.status(200).json({ processors });
 });
 
+async function findCanonicalTableNameCollision(canonicalTableName) {
+  const { rows } = await pool.query(
+    `SELECT id, event_type, table_name
+     FROM event_processors
+     WHERE LOWER(TRIM(table_name)) = $1`,
+    [canonicalTableName],
+  );
+
+  return rows.find((row) => row.table_name !== canonicalTableName) || null;
+}
+
 // API endpoint to register a new event processor configuration
 app.post("/api/event-processors", async (req, res) => {
   try {
@@ -1070,24 +1083,44 @@ app.post("/api/event-processors", async (req, res) => {
     if (!eventType || !tableName || !fieldMappings || !fieldVerification) {
       return res.status(400).json({
         error:
-          "Missing required parameters: eventType, tableName, and fieldMappings are required",
+          "Missing required parameters: eventType, tableName, fieldMappings, and fieldVerification are required",
+      });
+    }
+
+    const sqlConfig = buildProcessorSqlConfig(tableName, fieldMappings);
+    const collision = await findCanonicalTableNameCollision(
+      sqlConfig.canonicalTableName,
+    );
+
+    if (collision) {
+      return res.status(400).json({
+        error:
+          `Table name ${tableName} conflicts with existing processor table ${collision.table_name} after canonicalization`,
       });
     }
 
     // Register the new event processor configuration
     const result = await loadEventProcessors.registerEventProcessor(
       eventType,
-      tableName,
+      sqlConfig.canonicalTableName,
       fieldMappings,
+      fieldVerification,
+      pool,
     );
 
     res.status(201).json({
       message: "Event processor registered successfully",
       eventType,
-      tableName,
+      tableName: result.tableName || sqlConfig.canonicalTableName,
       ...result,
     });
   } catch (err) {
+    if (isProcessorConfigValidationError(err)) {
+      return res.status(400).json({
+        error: err.message,
+      });
+    }
+
     logger.error("Error registering event processor:", err);
     res.status(500).json({
       error: "Failed to register event processor",
@@ -1470,18 +1503,16 @@ async function shutdown(reason) {
   }
 }
 
-// Export for testing
-module.exports = {
-  app,
-  startServer,
-  processTelemetryLogs,
-  ensureTablesExist,
-  parseTelemetryMessage,
-};
-
 // Only start server if this file is run directly (not when required in tests)
 if (require.main === module) {
   startServer();
 }
 
-module.exports = { app, pool };
+module.exports = {
+  app,
+  pool,
+  startServer,
+  processTelemetryLogs,
+  ensureTablesExist,
+  parseTelemetryMessage,
+};

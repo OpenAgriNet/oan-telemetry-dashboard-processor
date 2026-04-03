@@ -47,6 +47,10 @@ function getCSVArg() {
     return null;
 }
 
+function hasFlag(flag) {
+    return process.argv.slice(2).includes(flag);
+}
+
 // ── CSV column order (must match the CSV header exactly) ─────
 const CSV_COLUMNS = [
     "job_id",
@@ -199,8 +203,22 @@ function parseTranscript(transcript) {
 }
 
 // ── Ensure tables exist (idempotent) ─────────────────────────
-async function ensureTables(client) {
-    await client.query(`
+async function ensureTables(client, { forceDDL = false } = {}) {
+    const schemaProbe = await client.query(`
+    SELECT
+      to_regclass('public.calls')      AS calls_table,
+      to_regclass('public.messages')   AS messages_table,
+      to_regclass('public.ingest_log') AS ingest_log_table
+  `);
+
+    const schemaReady = Boolean(
+        schemaProbe.rows[0]?.calls_table &&
+        schemaProbe.rows[0]?.messages_table &&
+        schemaProbe.rows[0]?.ingest_log_table
+    );
+
+    if (!schemaReady || forceDDL) {
+        await client.query(`
     CREATE TABLE IF NOT EXISTS calls (
       id                                        SERIAL PRIMARY KEY,
       interaction_id                            TEXT UNIQUE NOT NULL,
@@ -235,7 +253,7 @@ async function ensureTables(client) {
     );
   `);
 
-    await client.query(`
+        await client.query(`
     CREATE TABLE IF NOT EXISTS messages (
       id             SERIAL PRIMARY KEY,
       call_id        INTEGER NOT NULL REFERENCES calls(id) ON DELETE CASCADE,
@@ -246,7 +264,7 @@ async function ensureTables(client) {
     );
   `);
 
-    await client.query(`
+        await client.query(`
     CREATE TABLE IF NOT EXISTS ingest_log (
       id                  SERIAL PRIMARY KEY,
       filename            TEXT NOT NULL,
@@ -256,15 +274,15 @@ async function ensureTables(client) {
       messages_parsed     INTEGER
     );
   `);
+    }
 
-    // Indexes (IF NOT EXISTS is safe to repeat)
+    // Keep reconciliation behavior: always ensure indexes/views exist and are up to date.
     await client.query(`CREATE INDEX IF NOT EXISTS idx_calls_user_id        ON calls(user_id);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_calls_start_datetime ON calls(start_datetime);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_calls_end_reason     ON calls(end_reason);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_calls_language       ON calls(language_name);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_call_id     ON messages(call_id);`);
 
-    // Views
     await client.query(`
     CREATE OR REPLACE VIEW call_log AS
     SELECT
@@ -294,14 +312,18 @@ async function ensureTables(client) {
     JOIN messages m ON m.call_id = c.id
     ORDER BY c.start_datetime DESC, m.message_order ASC;
   `);
+
+    return { ddlSkipped: schemaReady && !forceDDL, viewsUpdated: true };
 }
 
 // ── Main ─────────────────────────────────────────────────────
 async function main() {
     const csvArg = getCSVArg();
+    const forceDDL = hasFlag("--force-ddl");
     if (!csvArg) {
         console.error("Usage: node ingest_csv.js --file <csvfile>");
         console.error("  e.g. node ingest_csv.js --file BharatVistaarVoiceAgentLID-2026-02-26.csv");
+        console.error("  add --force-ddl to re-run CREATE TABLE/INDEX/VIEW statements");
         process.exit(1);
     }
 
@@ -335,11 +357,18 @@ async function main() {
     try {
         // 1. Ensure schema
         console.log("⏳ Ensuring tables exist...");
-        await ensureTables(client);
-        console.log("✅ Tables ready\n");
+        const schemaStart = Date.now();
+        const schemaResult = await ensureTables(client, { forceDDL });
+        const schemaSecs = ((Date.now() - schemaStart) / 1000).toFixed(1);
+        if (schemaResult.ddlSkipped) {
+            console.log(`✅ Schema already present (DDL skipped, ${schemaSecs}s)\n`);
+        } else {
+            console.log(`✅ Tables and views ready (${schemaSecs}s)\n`);
+        }
 
         // 2. Stream-parse CSV and collect rows
         console.log("⏳ Reading CSV...");
+        const parseStart = Date.now();
         const rows = [];
         const transcripts = new Map(); // interaction_id → transcript
 
@@ -414,13 +443,15 @@ async function main() {
             }
         }
 
-        console.log(`✅ CSV parsed: ${rows.length.toLocaleString()} data rows\n`);
+        const parseSecs = ((Date.now() - parseStart) / 1000).toFixed(1);
+        console.log(`✅ CSV parsed: ${rows.length.toLocaleString()} data rows (${parseSecs}s)\n`);
 
         // 3. Batch insert calls with ON CONFLICT DO NOTHING
         console.log("⏳ Inserting calls (skipping duplicates)...");
 
-        const BATCH_SIZE = 500;
+        const BATCH_SIZE = 1500;
         let newCalls = 0;
+        const callsInsertStart = Date.now();
 
         await client.query("BEGIN");
 
@@ -477,48 +508,76 @@ async function main() {
             }
         }
 
-        console.log(`✅ Calls: ${newCalls.toLocaleString()} new, ${(rows.length - newCalls).toLocaleString()} skipped (duplicates)\n`);
+        const callsInsertSecs = ((Date.now() - callsInsertStart) / 1000).toFixed(1);
+        console.log(`✅ Calls: ${newCalls.toLocaleString()} new, ${(rows.length - newCalls).toLocaleString()} skipped (duplicates) (${callsInsertSecs}s)\n`);
 
         // 4. Parse transcripts for new calls (those with no messages yet)
         console.log("⏳ Parsing transcripts for new calls...");
         let messagesParsed = 0;
+        const transcriptStart = Date.now();
 
         if (newCalls > 0 && transcripts.size > 0) {
-            // Get IDs of calls that have no messages yet
             const interactionIds = Array.from(transcripts.keys());
+            const CALL_ID_BATCH = 5000;
+            const MSG_INSERT_BATCH = 2000;
+            const pendingMessages = [];
 
-            // Process in batches to avoid huge IN clauses
-            const MSG_BATCH = 200;
-            for (let i = 0; i < interactionIds.length; i += MSG_BATCH) {
-                const batch = interactionIds.slice(i, i + MSG_BATCH);
-                const ph = batch.map((_, idx) => `$${idx + 1}`).join(",");
+            const flushMessages = async () => {
+                if (pendingMessages.length === 0) return;
 
+                const values = [];
+                const placeholders = pendingMessages.map((msg, idx) => {
+                    const offset = idx * 4;
+                    values.push(msg.call_id, msg.role, msg.content, msg.message_order);
+                    return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4})`;
+                });
+
+                const result = await client.query(`
+          INSERT INTO messages (call_id, role, content, message_order)
+          VALUES ${placeholders.join(",")}
+          ON CONFLICT (call_id, message_order) DO NOTHING
+        `, values);
+
+                messagesParsed += result.rowCount;
+                pendingMessages.length = 0;
+            };
+
+            for (let i = 0; i < interactionIds.length; i += CALL_ID_BATCH) {
+                const batch = interactionIds.slice(i, i + CALL_ID_BATCH);
                 const callRows = await client.query(`
           SELECT c.id, c.interaction_id
           FROM calls c
-          WHERE c.interaction_id IN (${ph})
+          WHERE c.interaction_id = ANY($1::TEXT[])
             AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.call_id = c.id)
-        `, batch);
+        `, [batch]);
 
                 for (const callRow of callRows.rows) {
                     const transcript = transcripts.get(callRow.interaction_id);
                     const msgs = parseTranscript(transcript);
 
                     for (let order = 0; order < msgs.length; order++) {
-                        await client.query(`
-              INSERT INTO messages (call_id, role, content, message_order)
-              VALUES ($1, $2, $3, $4)
-              ON CONFLICT (call_id, message_order) DO NOTHING
-            `, [callRow.id, msgs[order].role, msgs[order].content, order + 1]);
-                        messagesParsed++;
+                        pendingMessages.push({
+                            call_id: callRow.id,
+                            role: msgs[order].role,
+                            content: msgs[order].content,
+                            message_order: order + 1,
+                        });
+
+                        if (pendingMessages.length >= MSG_INSERT_BATCH) {
+                            await flushMessages();
+                        }
                     }
                 }
 
-                if ((i + MSG_BATCH) % 10000 < MSG_BATCH) {
-                    console.log(`   ... transcripts: ${Math.min(i + MSG_BATCH, interactionIds.length).toLocaleString()} / ${interactionIds.length.toLocaleString()}`);
+                await flushMessages();
+
+                if ((i + CALL_ID_BATCH) % 20000 < CALL_ID_BATCH) {
+                    console.log(`   ... transcripts: ${Math.min(i + CALL_ID_BATCH, interactionIds.length).toLocaleString()} / ${interactionIds.length.toLocaleString()}`);
                 }
             }
         }
+
+        const transcriptSecs = ((Date.now() - transcriptStart) / 1000).toFixed(1);
 
         // 5. Log the run
         await client.query(`
@@ -535,7 +594,7 @@ async function main() {
       SELECT 'messages' AS tbl, COUNT(*)::INTEGER AS total FROM messages
     `);
 
-        console.log(`✅ Messages parsed: ${messagesParsed.toLocaleString()}\n`);
+        console.log(`✅ Messages parsed: ${messagesParsed.toLocaleString()} (${transcriptSecs}s)\n`);
         console.log("═══════════════════════════════════════════════");
         console.log("  INGEST SUMMARY");
         console.log("═══════════════════════════════════════════════");

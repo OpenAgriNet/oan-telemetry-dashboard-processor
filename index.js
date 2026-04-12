@@ -939,6 +939,9 @@ BEGIN
         IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'os_version') THEN
           ALTER TABLE public.users ADD COLUMN os_version VARCHAR(20);
         END IF;
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'channel') THEN
+          ALTER TABLE public.users ADD COLUMN channel VARCHAR;
+        END IF;
       END $$;
 `);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_users_uid ON users(uid)`);
@@ -1060,19 +1063,20 @@ async function processUserData(client, event) {
     logger.debug(`processUserData: uid = ${uid}, fingerprint_id = ${fingerprint?.device_id || 'null'}, browser = ${fingerprint?.browser?.name || 'null'}, device = ${fingerprint?.device?.name || 'null'}, os = ${fingerprint?.os?.name || 'null'} `);
 
     const result = await client.query(`
-      INSERT INTO users(uid, mobile, username, email, role, farmer_id,
+      INSERT INTO users(uid, mobile, username, email, role, farmer_id, channel,
   registered_location, device_location, agristack_location,
   fingerprint_id, browser_code, browser_name, browser_version,
   device_code, device_name, device_model,
   os_code, os_name, os_version,
   first_seen_at, last_seen_at)
-VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
       ON CONFLICT(uid) DO UPDATE SET
 mobile = COALESCE(EXCLUDED.mobile, users.mobile),
   username = COALESCE(EXCLUDED.username, users.username),
   email = COALESCE(EXCLUDED.email, users.email),
   role = COALESCE(EXCLUDED.role, users.role),
   farmer_id = COALESCE(EXCLUDED.farmer_id, users.farmer_id),
+  channel = COALESCE(EXCLUDED.channel, users.channel),
   registered_location = COALESCE(EXCLUDED.registered_location, users.registered_location),
   device_location = COALESCE(EXCLUDED.device_location, users.device_location),
   agristack_location = COALESCE(EXCLUDED.agristack_location, users.agristack_location),
@@ -1095,6 +1099,7 @@ mobile = COALESCE(EXCLUDED.mobile, users.mobile),
       target.email || null,
       target.role || null,
       target.farmer_id || null,
+      event.channel || null,
       target.registered_location || null,
       target.device_location || null,
       target.agristack_location || null,

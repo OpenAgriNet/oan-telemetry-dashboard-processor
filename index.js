@@ -391,6 +391,9 @@ async function ensureTablesExist() {
         IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'feedback' AND column_name = 'fingerprint_id') THEN
           ALTER TABLE public.feedback ADD COLUMN fingerprint_id VARCHAR(64);
         END IF;
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'feedback' AND column_name = 'feedback_source') THEN
+          ALTER TABLE public.feedback ADD COLUMN feedback_source VARCHAR DEFAULT 'chat';
+        END IF;
       END $$;
     `);
 
@@ -724,6 +727,55 @@ field_verification = 'edata.eks.target.feedbackDetails',
       WHERE table_name = 'feedback';
 `);
 
+    // Register telefeedback (voice feedback) processor - inserts into feedback table via TABLE_NAME_OVERRIDES
+    await client.query(`
+      INSERT INTO public.event_processors(event_type, table_name, field_mappings, field_verification)
+VALUES
+  ('OE_ITEM_RESPONSE', 'telefeedback', '{
+    "unique_id": "edata.eks.target.unique_id",
+    "uid": "uid",
+    "sid": "sid",
+    "channel": "channel",
+    "ets": "ets",
+    "feedbackText": "edata.eks.target.telefeedbackDetails.feedbackText",
+    "feedbackType": "edata.eks.target.telefeedbackDetails.feedbackType",
+    "mobile": "edata.eks.target.mobile",
+    "username": "edata.eks.target.username",
+    "email": "edata.eks.target.email",
+    "role": "edata.eks.target.role",
+    "farmer_id": "edata.eks.target.farmer_id",
+    "registered_location": "edata.eks.target.registered_location",
+    "device_location": "edata.eks.target.device_location",
+    "agristack_location": "edata.eks.target.agristack_location"
+  }','edata.eks.target.telefeedbackDetails')
+ON CONFLICT DO NOTHING;
+`);
+    await client.query(`
+      UPDATE public.event_processors
+SET
+event_type = 'OE_ITEM_RESPONSE',
+  field_mappings = '{
+    "unique_id": "edata.eks.target.unique_id",
+    "uid": "uid",
+    "sid": "sid",
+    "channel": "channel",
+    "ets": "ets",
+    "feedbackText": "edata.eks.target.telefeedbackDetails.feedbackText",
+    "feedbackType": "edata.eks.target.telefeedbackDetails.feedbackType",
+    "mobile": "edata.eks.target.mobile",
+    "username": "edata.eks.target.username",
+    "email": "edata.eks.target.email",
+    "role": "edata.eks.target.role",
+    "farmer_id": "edata.eks.target.farmer_id",
+    "registered_location": "edata.eks.target.registered_location",
+    "device_location": "edata.eks.target.device_location",
+    "agristack_location": "edata.eks.target.agristack_location"
+  }',
+field_verification = 'edata.eks.target.telefeedbackDetails',
+  updated_at = NOW()
+      WHERE table_name = 'telefeedback';
+`);
+
     await client.query(`
       INSERT INTO public.event_processors(event_type, table_name, field_mappings, field_verification)
 VALUES
@@ -968,6 +1020,10 @@ BEGIN
     // feedback table indexes
     await client.query(`CREATE INDEX IF NOT EXISTS idx_feedback_created_at ON feedback(created_at)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_feedback_uid ON feedback(uid)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_feedback_feedback_source ON feedback(feedback_source)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_feedback_feedbacktype ON feedback(feedbacktype)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_feedback_channel ON feedback(channel)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_feedback_ets ON feedback(ets)`);
 
     // errorDetails table indexes
     await client.query(`CREATE INDEX IF NOT EXISTS idx_errordetails_created_at ON errordetails(created_at)`);
@@ -1301,9 +1357,10 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()} `) {
         const eventMid = event.mid || 'unknown';
         logger.debug(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}/${events.length}] Processing event type: ${eventType}, uid: ${eventUid}, mid: ${eventMid} `);
 
-        // Check if this is a TTS or ASR event
+        // Check if this is a TTS, ASR, or TeleFeedback event
         const hasTtsResponse = getNestedValue(event, 'edata.eks.target.ttsResponseDetails');
         const hasAsrResponse = getNestedValue(event, 'edata.eks.target.asrResponseDetails');
+        const hasTeleFeedback = getNestedValue(event, 'edata.eks.target.telefeedbackDetails');
 
         let eventProcessed = false;
         let matchedProcessor = null;
@@ -1334,9 +1391,9 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()} `) {
 
           logger.debug(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}] Checking processor '${key}': eventType match = ${processor["eventType"] === eventType}, verified = ${verified !== undefined} `);
 
-          // CRITICAL: Skip questions processor if ASR/TTS response exists
-          // This prevents ASR/TTS events from being consumed by questions processor
-          if (processor["tableName"] === 'questions' && (hasAsrResponse || hasTtsResponse)) {
+          // CRITICAL: Skip questions processor if ASR/TTS/TeleFeedback response exists
+          // This prevents these events from being consumed by questions processor
+          if (processor["tableName"] === 'questions' && (hasAsrResponse || hasTtsResponse || hasTeleFeedback)) {
             continue;
           }
 
@@ -1350,8 +1407,9 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()} `) {
             if (processor["tableName"] === "questions") {
               const hasTtsData = getNestedValue(event, "edata.eks.target.ttsResponseDetails");
               const hasAsrData = getNestedValue(event, "edata.eks.target.asrResponseDetails");
-              if (hasTtsData !== undefined || hasAsrData !== undefined) {
-                logger.debug(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}] Skipping 'questions' processor for TTS/ASR event`);
+              const hasTeleFeedbackData = getNestedValue(event, "edata.eks.target.telefeedbackDetails");
+              if (hasTtsData !== undefined || hasAsrData !== undefined || hasTeleFeedbackData !== undefined) {
+                logger.debug(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}] Skipping 'questions' processor for TTS/ASR/TeleFeedback event`);
                 continue;
               }
             }
@@ -1514,9 +1572,10 @@ async function processTelemetryLogsFast(batchId = `fast_${Date.now()}`) {
         for (const event of events) {
           const eventType = event.eid;
 
-          // Check for TTS/ASR
+          // Check for TTS/ASR/TeleFeedback
           const hasTtsResponse = getNestedValue(event, 'edata.eks.target.ttsResponseDetails');
           const hasAsrResponse = getNestedValue(event, 'edata.eks.target.asrResponseDetails');
+          const hasTeleFeedback = getNestedValue(event, 'edata.eks.target.telefeedbackDetails');
 
           let eventProcessed = false;
 
@@ -1536,8 +1595,8 @@ async function processTelemetryLogsFast(batchId = `fast_${Date.now()}`) {
           for (const { key, processor } of orderedProcessors) {
             const verified = getNestedValue(event, processor["fieldVerification"]);
 
-            // Skip questions processor for ASR/TTS events
-            if (processor["tableName"] === 'questions' && (hasAsrResponse || hasTtsResponse)) {
+            // Skip questions processor for ASR/TTS/TeleFeedback events
+            if (processor["tableName"] === 'questions' && (hasAsrResponse || hasTtsResponse || hasTeleFeedback)) {
               continue;
             }
 
@@ -1545,7 +1604,8 @@ async function processTelemetryLogsFast(batchId = `fast_${Date.now()}`) {
               if (processor["tableName"] === "questions") {
                 const hasTtsData = getNestedValue(event, "edata.eks.target.ttsResponseDetails");
                 const hasAsrData = getNestedValue(event, "edata.eks.target.asrResponseDetails");
-                if (hasTtsData !== undefined || hasAsrData !== undefined) {
+                const hasTeleFeedbackData = getNestedValue(event, "edata.eks.target.telefeedbackDetails");
+                if (hasTtsData !== undefined || hasAsrData !== undefined || hasTeleFeedbackData !== undefined) {
                   continue;
                 }
               }

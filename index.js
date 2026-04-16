@@ -1362,9 +1362,10 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()} `) {
 
           logger.debug(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}] Checking processor '${key}': eventType match = ${processor["eventType"] === eventType}, verified = ${verified !== undefined} `);
 
-          // CRITICAL: Skip questions processor if ASR/TTS response exists
-          // This prevents ASR/TTS events from being consumed by questions processor
-          if (processor["tableName"] === 'questions' && (hasAsrResponse || hasTtsResponse)) {
+          // CRITICAL: Skip questions processor if ASR/TTS/voice response exists
+          // This prevents ASR/TTS/voice events from being consumed by questions processor
+          const hasVoiceResponse = getNestedValue(event, 'edata.eks.target.questionsDetails.responseText');
+          if (processor["tableName"] === 'questions' && (hasAsrResponse || hasTtsResponse || hasVoiceResponse)) {
             continue;
           }
 

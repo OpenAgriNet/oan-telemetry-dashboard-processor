@@ -42,6 +42,7 @@ CREATE TABLE calls (
     provider_type                             TEXT,
     current_language                          TEXT,
     language_changed                          BOOLEAN DEFAULT FALSE,
+    source                                    VARCHAR DEFAULT 'csv',
     created_at                                TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -77,6 +78,19 @@ CREATE TABLE IF NOT EXISTS ingest_log (
     new_calls_added     INTEGER,
     messages_parsed     INTEGER
 );
+
+-- ============================================================
+-- voice_call_tracking — tracks voice telemetry ingestion state
+-- ============================================================
+CREATE TABLE IF NOT EXISTS voice_call_tracking (
+    sid                 TEXT PRIMARY KEY,
+    call_id             INTEGER REFERENCES calls(id),
+    turns_processed     INTEGER DEFAULT 0,
+    last_ets            BIGINT,
+    ingested_at         TIMESTAMP DEFAULT NOW(),
+    updated_at          TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_voice_tracking_sid ON voice_call_tracking(sid);
 
 -- ============================================================
 -- Views

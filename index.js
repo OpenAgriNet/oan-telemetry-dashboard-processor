@@ -975,6 +975,31 @@ BEGIN
 
     logger.info("Performance indexes created/verified");
 
+    // ============================================
+    // VOICE TELEMETRY: calls source column + voice_call_tracking
+    // ============================================
+
+    await client.query(`
+      ALTER TABLE calls ADD COLUMN IF NOT EXISTS source VARCHAR DEFAULT 'csv';
+    `);
+    await client.query(`
+      UPDATE calls SET source = 'csv' WHERE source IS NULL;
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.voice_call_tracking (
+        sid TEXT PRIMARY KEY,
+        call_id INTEGER REFERENCES calls(id),
+        turns_processed INTEGER DEFAULT 0,
+        last_ets BIGINT,
+        ingested_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_voice_tracking_sid ON voice_call_tracking(sid);
+    `);
+
     // Create sessions table for V2 (no device_id - device info stored in users)
     //     await client.query(`
     //       CREATE TABLE IF NOT EXISTS public.sessions(
@@ -1296,6 +1321,14 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()} `) {
         const eventMid = event.mid || 'unknown';
         logger.debug(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}/${events.length}] Processing event type: ${eventType}, uid: ${eventUid}, mid: ${eventMid} `);
 
+        // Handle voice telemetry events
+        if (eventType === 'OE_VOICE_RESPONSE') {
+          await processVoiceResponse(client, event);
+          eventProcessed = true;
+          totalEventsProcessed++;
+          continue;
+        }
+
         // Check if this is a TTS or ASR event
         const hasTtsResponse = getNestedValue(event, 'edata.eks.target.ttsResponseDetails');
         const hasAsrResponse = getNestedValue(event, 'edata.eks.target.asrResponseDetails');
@@ -1508,6 +1541,14 @@ async function processTelemetryLogsFast(batchId = `fast_${Date.now()}`) {
 
         for (const event of events) {
           const eventType = event.eid;
+
+          // Handle voice telemetry events
+          if (eventType === 'OE_VOICE_RESPONSE') {
+            await processVoiceResponse(client, event);
+            eventProcessed = true;
+            totalEventsProcessed++;
+            continue;
+          }
 
           // Check for TTS/ASR
           const hasTtsResponse = getNestedValue(event, 'edata.eks.target.ttsResponseDetails');
@@ -1778,6 +1819,110 @@ async function processFeedbackData(client, event) {
   }
 }
 
+/**
+ * Process a single OE_VOICE_RESPONSE telemetry event into calls + messages tables.
+ * Each event represents one voice turn (user question + assistant response).
+ *
+ * @param {Object} client - Database client
+ * @param {Object} event - OE_VOICE_RESPONSE telemetry event
+ */
+async function processVoiceResponse(client, event) {
+  try {
+    const sid = event.sid;
+    const uid = event.uid || 'guest';
+    const ets = event.ets;
+    const questionText = event.edata?.eks?.target?.questionsDetails?.questionText;
+    const responseText = event.edata?.eks?.target?.questionsDetails?.responseText;
+    const sourceLang = event.edata?.eks?.target?.questionsDetails?.sourceLang;
+    const targetLang = event.edata?.eks?.target?.questionsDetails?.targetLang;
+
+    if (!sid || !ets) {
+      logger.debug('processVoiceResponse: missing sid or ets, skipping');
+      return;
+    }
+
+    const interactionId = sid;
+    const userId = (uid === 'guest' || !uid) ? null : uid;
+
+    // Step 1: Upsert calls row
+    await client.query(`
+      INSERT INTO calls (
+        interaction_id, user_id, start_datetime, end_datetime,
+        duration_in_seconds, language_name, current_language,
+        num_messages, channel_type, source
+      )
+      VALUES (
+        $1, $2, to_timestamp($3 / 1000.0), to_timestamp($3 / 1000.0),
+        0, $4, $5, 0, 'voice', 'voice'
+      )
+      ON CONFLICT (interaction_id) DO UPDATE SET
+        end_datetime = GREATEST(EXCLUDED.end_datetime, calls.end_datetime),
+        start_datetime = LEAST(EXCLUDED.start_datetime, calls.start_datetime),
+        duration_in_seconds = EXTRACT(EPOCH FROM (
+          GREATEST(EXCLUDED.end_datetime, calls.end_datetime) -
+          LEAST(EXCLUDED.start_datetime, calls.start_datetime)
+        )),
+        language_name = COALESCE(EXCLUDED.language_name, calls.language_name),
+        current_language = COALESCE(EXCLUDED.current_language, calls.current_language),
+        num_messages = calls.num_messages + 1,
+        user_id = COALESCE(EXCLUDED.user_id, calls.user_id)
+    `, [interactionId, userId, ets, sourceLang || null, targetLang || null]);
+
+    // Step 2: Get call_id
+    const callRow = await client.query(
+      'SELECT id FROM calls WHERE interaction_id = $1',
+      [interactionId]
+    );
+    if (!callRow.rows.length) {
+      logger.warn(`processVoiceResponse: could not find call for interaction_id=${interactionId}`);
+      return;
+    }
+    const callId = callRow.rows[0].id;
+
+    // Step 3: Get current max message_order for this call
+    const maxOrderRow = await client.query(
+      'SELECT COALESCE(MAX(message_order), 0) AS max_order FROM messages WHERE call_id = $1',
+      [callId]
+    );
+    let nextOrder = parseInt(maxOrderRow.rows[0].max_order) + 1;
+
+    // Step 4: Insert messages
+    // Welcome turn: no questionText, only responseText (assistant only)
+    // Normal turn: questionText + responseText (user + assistant)
+    if (questionText && questionText.trim()) {
+      await client.query(`
+        INSERT INTO messages (call_id, role, content, message_order)
+        VALUES ($1, 'user', $2, $3)
+        ON CONFLICT (call_id, message_order) DO NOTHING
+      `, [callId, questionText.trim(), nextOrder]);
+      nextOrder++;
+    }
+
+    if (responseText && responseText.trim()) {
+      await client.query(`
+        INSERT INTO messages (call_id, role, content, message_order)
+        VALUES ($1, 'assistant', $2, $3)
+        ON CONFLICT (call_id, message_order) DO NOTHING
+      `, [callId, responseText.trim(), nextOrder]);
+    }
+
+    // Step 5: Upsert voice_call_tracking
+    await client.query(`
+      INSERT INTO voice_call_tracking (sid, call_id, turns_processed, last_ets)
+      VALUES ($1, $2, 1, $3)
+      ON CONFLICT (sid) DO UPDATE SET
+        turns_processed = voice_call_tracking.turns_processed + 1,
+        last_ets = GREATEST(voice_call_tracking.last_ets, EXCLUDED.last_ets),
+        updated_at = NOW()
+    `, [sid, callId, ets]);
+
+    logger.debug(`processVoiceResponse: sid=${sid}, callId=${callId}, order=${nextOrder}`);
+  } catch (err) {
+    logger.error(`Error processing voice response: ${err.message}`);
+    throw err;
+  }
+}
+
 // Lock to prevent concurrent cron runs
 let isProcessingLogs = false;
 let currentBatchId = null;
@@ -1905,6 +2050,62 @@ app.get("/health", (req, res) => {
     version: process.env.npm_package_version || "1.0.0",
     eventProcessors: Object.keys(eventProcessors).length,
   });
+});
+
+// API endpoint to backfill voice telemetry from existing winston_logs
+app.post("/api/backfill-voice", async (req, res) => {
+  const batchId = `backfill_voice_${Date.now()}`;
+  logger.info(`[${batchId}] Starting voice telemetry backfill...`);
+
+  const client = await pool.connect();
+  let logsProcessed = 0;
+  let voiceEventsProcessed = 0;
+  let errors = 0;
+
+  try {
+    await client.query("BEGIN");
+
+    const result = await client.query(`
+      SELECT id, message, "timestamp" FROM winston_logs
+      WHERE message::text LIKE '%"eid":"OE_VOICE_RESPONSE"%'
+      ORDER BY "timestamp" ASC
+    `);
+
+    logger.info(`[${batchId}] Found ${result.rows.length} logs with voice events`);
+
+    for (const log of result.rows) {
+      try {
+        const events = parseTelemetryMessage(log.message, batchId, 0);
+        for (const event of events) {
+          if (event.eid === 'OE_VOICE_RESPONSE') {
+            await processVoiceResponse(client, event);
+            voiceEventsProcessed++;
+          }
+        }
+        logsProcessed++;
+      } catch (err) {
+        logger.error(`[${batchId}] Error processing log ${log.id}: ${err.message}`);
+        errors++;
+      }
+    }
+
+    await client.query("COMMIT");
+
+    logger.info(`[${batchId}] Backfill complete: ${logsProcessed} logs, ${voiceEventsProcessed} voice events, ${errors} errors`);
+
+    res.status(200).json({
+      success: true,
+      logsProcessed,
+      voiceEventsProcessed,
+      errors,
+    });
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    logger.error(`[${batchId}] Backfill failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    client.release();
+  }
 });
 
 // Function to refresh user location aggregation data
@@ -2338,6 +2539,7 @@ module.exports = {
   processTelemetryLogsFast,
   ensureTablesExist,
   parseTelemetryMessage,
+  processVoiceResponse,
 };
 
 // Only start server if this file is run directly (not when required in tests)

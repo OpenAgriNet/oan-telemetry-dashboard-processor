@@ -38,9 +38,9 @@ const pool = new Pool({
   max: parseInt(process.env.DB_POOL_MAX || "20", 10),
   idleTimeoutMillis: parseInt(process.env.DB_IDLE_TIMEOUT_MS || "30000", 10),
   connectionTimeoutMillis: parseInt(process.env.DB_CONN_TIMEOUT_MS || "5000", 10),
-  // ssl: {
-  //   rejectUnauthorized: false
-  // }
+  ssl: {
+    rejectUnauthorized: false
+  }
 });
 
 // async function ensureVillagesSeeded() {
@@ -1321,9 +1321,6 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()} `) {
         const eventMid = event.mid || 'unknown';
         logger.debug(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}/${events.length}] Processing event type: ${eventType}, uid: ${eventUid}, mid: ${eventMid} `);
 
-        let eventProcessed = false;
-        let matchedProcessor = null;
-
         // Handle voice telemetry events
         if (eventType === 'OE_VOICE_RESPONSE') {
           await processVoiceResponse(client, event);
@@ -1335,6 +1332,9 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()} `) {
         // Check if this is a TTS or ASR event
         const hasTtsResponse = getNestedValue(event, 'edata.eks.target.ttsResponseDetails');
         const hasAsrResponse = getNestedValue(event, 'edata.eks.target.asrResponseDetails');
+
+        let eventProcessed = false;
+        let matchedProcessor = null;
 
         // PRIORITY CHECK: Process ASR/TTS events first (they have higher priority)
         // This prevents them from being consumed by the questions processor
@@ -1543,8 +1543,6 @@ async function processTelemetryLogsFast(batchId = `fast_${Date.now()}`) {
         for (const event of events) {
           const eventType = event.eid;
 
-          let eventProcessed = false;
-
           // Handle voice telemetry events
           if (eventType === 'OE_VOICE_RESPONSE') {
             await processVoiceResponse(client, event);
@@ -1556,6 +1554,8 @@ async function processTelemetryLogsFast(batchId = `fast_${Date.now()}`) {
           // Check for TTS/ASR
           const hasTtsResponse = getNestedValue(event, 'edata.eks.target.ttsResponseDetails');
           const hasAsrResponse = getNestedValue(event, 'edata.eks.target.asrResponseDetails');
+
+          let eventProcessed = false;
 
           // Separate priority processors from regular ones (same logic as original)
           const priorityProcessors = [];

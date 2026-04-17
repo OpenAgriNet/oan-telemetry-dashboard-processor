@@ -1606,6 +1606,8 @@ async function processTelemetryLogsFast(batchId = `fast_${Date.now()}`) {
         for (const event of events) {
           const eventType = event.eid;
 
+          let eventProcessed = false;
+
           // Handle voice telemetry events
           if (eventType === 'OE_VOICE_RESPONSE') {
             await processVoiceResponse(client, event);
@@ -1618,8 +1620,6 @@ async function processTelemetryLogsFast(batchId = `fast_${Date.now()}`) {
           const hasTtsResponse = getNestedValue(event, 'edata.eks.target.ttsResponseDetails');
           const hasAsrResponse = getNestedValue(event, 'edata.eks.target.asrResponseDetails');
           const hasTeleFeedback = getNestedValue(event, 'edata.eks.target.telefeedbackDetails');
-
-          let eventProcessed = false;
 
           // Separate priority processors from regular ones (same logic as original)
           const priorityProcessors = [];

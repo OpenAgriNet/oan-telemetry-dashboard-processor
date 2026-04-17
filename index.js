@@ -2685,10 +2685,9 @@ async function startServer() {
       logger.info(`Telemetry log processor service started on port ${PORT}`);
     });
 
-    // Run initial processing
-    logger.info(`Running initial telemetry log processing on startup (Fast Mode: ${FAST_MODE})...`);
-    const processFn = FAST_MODE ? processTelemetryLogsFast : processTelemetryLogs;
-    await processFn(`process_${Date.now()}`);
+    // Skip initial processing on startup — the cron job (every 3 min) will pick up logs
+    // This prevents overlap between startup processing and the first cron run
+    logger.info('Initial processing skipped on startup — cron will process logs on next scheduled run');
 
     // await refreshLeaderboardAggregation();
 

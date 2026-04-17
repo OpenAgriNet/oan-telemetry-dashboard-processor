@@ -10,6 +10,17 @@ const _ = require('lodash');
 // Event processor registry
 let eventProcessors = [];
 
+// Table name overrides: some processors insert into a different table than their registry name
+const TABLE_NAME_OVERRIDES = {
+  'telefeedback': 'feedback'
+};
+
+// Static extra fields added to inserts (not derived from event data)
+const STATIC_EXTRA_FIELDS = {
+  'telefeedback': { feedback_source: 'voice' },
+  'feedback': { feedback_source: 'chat' }
+};
+
 /**
  * Get a nested property from an object using dot notation path
  * 
@@ -219,10 +230,20 @@ function registerProcessor(id,eventType, tableName, fieldMappings, fieldVerifica
         placeholders.push(`$${paramIndex++}`);
       });
 
-      
+      // Append static extra fields (e.g., feedback_source for chat/voice distinction)
+      const staticFields = STATIC_EXTRA_FIELDS[tableName] || {};
+      Object.entries(staticFields).forEach(([field, value]) => {
+        fields.push(field.toLowerCase());
+        values.push(value);
+        placeholders.push(`$${paramIndex++}`);
+      });
+
+      // Resolve actual insert table (e.g., 'telefeedback' -> 'feedback')
+      const insertTableName = TABLE_NAME_OVERRIDES[tableName] || tableName;
+
       // Construct the SQL query
       const query = `
-        INSERT INTO ${tableName} (${fields.join(', ')})
+        INSERT INTO ${insertTableName} (${fields.join(', ')})
         VALUES (${placeholders.join(', ')})
       `;
       

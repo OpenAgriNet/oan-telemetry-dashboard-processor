@@ -1844,31 +1844,35 @@ async function processVoiceResponseBatch(client, events, batchId) {
       const chunk = events.slice(chunkStart, chunkStart + VOICE_BATCH_CHUNK);
 
       // Deduplicate by sid — multiple events can share same sid (same call, different turns)
-      const callAgg = new Map(); // sid -> {event, turnCount}
+      // Track min/max ets per sid to compute accurate duration
+      const callAgg = new Map(); // sid -> {event, turnCount, minEts, maxEts}
       for (const event of chunk) {
         const sid = event.sid;
         if (!sid || !event.ets) continue;
         if (!callAgg.has(sid)) {
-          callAgg.set(sid, { event, turnCount: 0 });
+          callAgg.set(sid, { event, turnCount: 0, minEts: event.ets, maxEts: event.ets });
         }
-        callAgg.get(sid).turnCount++;
+        const agg = callAgg.get(sid);
+        agg.turnCount++;
+        if (event.ets < agg.minEts) agg.minEts = event.ets;
+        if (event.ets > agg.maxEts) agg.maxEts = event.ets;
       }
 
       // Step 1: Batch upsert calls (one row per unique sid)
+      // Uses min/max ets for start/end datetime so duration is computed correctly
       const callValues = [];
       const callPlaceholders = [];
       const callSids = new Set();
 
-      for (const [sid, { event, turnCount }] of callAgg) {
+      for (const [sid, { event, turnCount, minEts, maxEts }] of callAgg) {
         const uid = event.uid || 'guest';
-        const ets = event.ets;
         const sourceLang = event.edata?.eks?.target?.questionsDetails?.sourceLang;
         const targetLang = event.edata?.eks?.target?.questionsDetails?.targetLang;
 
         const userId = (uid === 'guest' || !uid) ? null : uid;
-        const idx = callValues.length / 5;
-        callPlaceholders.push(`($${idx * 5 + 1}, $${idx * 5 + 2}, to_timestamp($${idx * 5 + 3} / 1000.0), to_timestamp($${idx * 5 + 3} / 1000.0), 0, $${idx * 5 + 4}, $${idx * 5 + 5}, ${turnCount}, 'voice', 'voice')`);
-        callValues.push(sid, userId, ets, sourceLang || null, targetLang || null);
+        const idx = callValues.length / 6;
+        callPlaceholders.push(`($${idx * 6 + 1}, $${idx * 6 + 2}, to_timestamp($${idx * 6 + 3} / 1000.0), to_timestamp($${idx * 6 + 4} / 1000.0), 0, $${idx * 6 + 5}, $${idx * 6 + 6}, ${turnCount}, 'voice', 'voice')`);
+        callValues.push(sid, userId, minEts, maxEts, sourceLang || null, targetLang || null);
         callSids.add(sid);
       }
 
@@ -2205,7 +2209,42 @@ app.post("/api/backfill-voice", async (req, res) => {
   }
 });
 
-// Function to refresh user location aggregation data
+// API endpoint to backfill voice call durations from voice_call_tracking
+app.post("/api/backfill-voice-duration", async (req, res) => {
+  const batchId = `backfill_duration_${Date.now()}`;
+  logger.info(`[${batchId}] Starting voice call duration backfill...`);
+
+  const client = await pool.connect();
+  try {
+    const result = await client.query(`
+      UPDATE calls c
+      SET
+        end_datetime = to_timestamp(vct.last_ets / 1000.0),
+        duration_in_seconds = EXTRACT(EPOCH FROM (
+          to_timestamp(vct.last_ets / 1000.0) - c.start_datetime
+        ))
+      FROM voice_call_tracking vct
+      WHERE vct.call_id = c.id
+        AND c.source = 'voice'
+        AND (c.duration_in_seconds IS NULL OR c.duration_in_seconds = 0)
+        AND vct.last_ets IS NOT NULL
+        AND c.start_datetime IS NOT NULL
+      RETURNING c.id, c.interaction_id, c.duration_in_seconds
+    `);
+
+    logger.info(`[${batchId}] Backfill complete: ${result.rowCount} voice calls updated with duration`);
+
+    res.status(200).json({
+      success: true,
+      updatedCalls: result.rowCount,
+    });
+  } catch (err) {
+    logger.error(`[${batchId}] Duration backfill failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    client.release();
+  }
+});
 // const LEADERBOARD_CUTOFF_DATE =
 //   process.env.LEADERBOARD_CUTOFF_DATE || "2025-10-01 00:00:00";
 // async function refreshLeaderboardAggregation() {

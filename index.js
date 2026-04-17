@@ -1034,6 +1034,31 @@ BEGIN
 
     logger.info("Performance indexes created/verified");
 
+    // ============================================
+    // VOICE TELEMETRY: calls source column + voice_call_tracking
+    // ============================================
+
+    await client.query(`
+      ALTER TABLE calls ADD COLUMN IF NOT EXISTS source VARCHAR DEFAULT 'csv';
+    `);
+    await client.query(`
+      UPDATE calls SET source = 'csv' WHERE source IS NULL;
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.voice_call_tracking (
+        sid TEXT PRIMARY KEY,
+        call_id INTEGER REFERENCES calls(id),
+        turns_processed INTEGER DEFAULT 0,
+        last_ets BIGINT,
+        ingested_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_voice_tracking_sid ON voice_call_tracking(sid);
+    `);
+
     // Create sessions table for V2 (no device_id - device info stored in users)
     //     await client.query(`
     //       CREATE TABLE IF NOT EXISTS public.sessions(
@@ -1357,6 +1382,14 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()} `) {
         const eventMid = event.mid || 'unknown';
         logger.debug(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}/${events.length}] Processing event type: ${eventType}, uid: ${eventUid}, mid: ${eventMid} `);
 
+        // Handle voice telemetry events
+        if (eventType === 'OE_VOICE_RESPONSE') {
+          await processVoiceResponse(client, event);
+          eventProcessed = true;
+          totalEventsProcessed++;
+          continue;
+        }
+
         // Check if this is a TTS, ASR, or TeleFeedback event
         const hasTtsResponse = getNestedValue(event, 'edata.eks.target.ttsResponseDetails');
         const hasAsrResponse = getNestedValue(event, 'edata.eks.target.asrResponseDetails');
@@ -1391,9 +1424,10 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()} `) {
 
           logger.debug(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}] Checking processor '${key}': eventType match = ${processor["eventType"] === eventType}, verified = ${verified !== undefined} `);
 
-          // CRITICAL: Skip questions processor if ASR/TTS/TeleFeedback response exists
-          // This prevents these events from being consumed by questions processor
-          if (processor["tableName"] === 'questions' && (hasAsrResponse || hasTtsResponse || hasTeleFeedback)) {
+          // CRITICAL: Skip questions processor if ASR/TTS/voice response/TeleFeedback exists
+          // This prevents ASR/TTS/voice/TeleFeedback events from being consumed by questions processor
+          const hasVoiceResponse = getNestedValue(event, 'edata.eks.target.questionsDetails.responseText');
+          if (processor["tableName"] === 'questions' && (hasAsrResponse || hasTtsResponse || hasVoiceResponse || hasTeleFeedback)) {
             continue;
           }
 
@@ -1572,6 +1606,14 @@ async function processTelemetryLogsFast(batchId = `fast_${Date.now()}`) {
         for (const event of events) {
           const eventType = event.eid;
 
+          // Handle voice telemetry events
+          if (eventType === 'OE_VOICE_RESPONSE') {
+            await processVoiceResponse(client, event);
+            eventProcessed = true;
+            totalEventsProcessed++;
+            continue;
+          }
+
           // Check for TTS/ASR/TeleFeedback
           const hasTtsResponse = getNestedValue(event, 'edata.eks.target.ttsResponseDetails');
           const hasAsrResponse = getNestedValue(event, 'edata.eks.target.asrResponseDetails');
@@ -1595,8 +1637,9 @@ async function processTelemetryLogsFast(batchId = `fast_${Date.now()}`) {
           for (const { key, processor } of orderedProcessors) {
             const verified = getNestedValue(event, processor["fieldVerification"]);
 
-            // Skip questions processor for ASR/TTS/TeleFeedback events
-            if (processor["tableName"] === 'questions' && (hasAsrResponse || hasTtsResponse || hasTeleFeedback)) {
+            // Skip questions processor for ASR/TTS/voice/TeleFeedback events
+            const hasVoiceResponse = getNestedValue(event, 'edata.eks.target.questionsDetails.responseText');
+            if (processor["tableName"] === 'questions' && (hasAsrResponse || hasTtsResponse || hasVoiceResponse || hasTeleFeedback)) {
               continue;
             }
 
@@ -1604,8 +1647,9 @@ async function processTelemetryLogsFast(batchId = `fast_${Date.now()}`) {
               if (processor["tableName"] === "questions") {
                 const hasTtsData = getNestedValue(event, "edata.eks.target.ttsResponseDetails");
                 const hasAsrData = getNestedValue(event, "edata.eks.target.asrResponseDetails");
+                const hasVoiceData = getNestedValue(event, "edata.eks.target.questionsDetails.responseText");
                 const hasTeleFeedbackData = getNestedValue(event, "edata.eks.target.telefeedbackDetails");
-                if (hasTtsData !== undefined || hasAsrData !== undefined || hasTeleFeedbackData !== undefined) {
+                if (hasTtsData !== undefined || hasAsrData !== undefined || hasVoiceData !== undefined || hasTeleFeedbackData !== undefined) {
                   continue;
                 }
               }
@@ -1683,7 +1727,7 @@ async function processTelemetryLogsFast(batchId = `fast_${Date.now()}`) {
       const lastSeenUids = Array.from(userLastSeenMap.keys());
       if (lastSeenUids.length > 0) {
         await client.query(
-          `UPDATE users SET last_seen_at = NOW() WHERE uid = ANY($1)`,
+          `UPDATE users SET last_seen_at = NOW() WHERE uid = ANY($1::text[])`,
           [lastSeenUids]
         );
       }
@@ -1691,7 +1735,7 @@ async function processTelemetryLogsFast(batchId = `fast_${Date.now()}`) {
       // Batch update sync_status for all processed logs in this micro-batch
       if (processedIds.length > 0) {
         await client.query(
-          `UPDATE winston_logs SET sync_status = 1 WHERE id = ANY($1)`,
+          `UPDATE winston_logs SET sync_status = 1 WHERE id = ANY($1::integer[])`,
           [processedIds]
         );
       }
@@ -1843,6 +1887,110 @@ async function processFeedbackData(client, event) {
   }
 }
 
+/**
+ * Process a single OE_VOICE_RESPONSE telemetry event into calls + messages tables.
+ * Each event represents one voice turn (user question + assistant response).
+ *
+ * @param {Object} client - Database client
+ * @param {Object} event - OE_VOICE_RESPONSE telemetry event
+ */
+async function processVoiceResponse(client, event) {
+  try {
+    const sid = event.sid;
+    const uid = event.uid || 'guest';
+    const ets = event.ets;
+    const questionText = event.edata?.eks?.target?.questionsDetails?.questionText;
+    const responseText = event.edata?.eks?.target?.questionsDetails?.responseText;
+    const sourceLang = event.edata?.eks?.target?.questionsDetails?.sourceLang;
+    const targetLang = event.edata?.eks?.target?.questionsDetails?.targetLang;
+
+    if (!sid || !ets) {
+      logger.debug('processVoiceResponse: missing sid or ets, skipping');
+      return;
+    }
+
+    const interactionId = sid;
+    const userId = (uid === 'guest' || !uid) ? null : uid;
+
+    // Step 1: Upsert calls row
+    await client.query(`
+      INSERT INTO calls (
+        interaction_id, user_id, start_datetime, end_datetime,
+        duration_in_seconds, language_name, current_language,
+        num_messages, channel_type, source
+      )
+      VALUES (
+        $1, $2, to_timestamp($3 / 1000.0), to_timestamp($3 / 1000.0),
+        0, $4, $5, 0, 'voice', 'voice'
+      )
+      ON CONFLICT (interaction_id) DO UPDATE SET
+        end_datetime = GREATEST(EXCLUDED.end_datetime, calls.end_datetime),
+        start_datetime = LEAST(EXCLUDED.start_datetime, calls.start_datetime),
+        duration_in_seconds = EXTRACT(EPOCH FROM (
+          GREATEST(EXCLUDED.end_datetime, calls.end_datetime) -
+          LEAST(EXCLUDED.start_datetime, calls.start_datetime)
+        )),
+        language_name = COALESCE(EXCLUDED.language_name, calls.language_name),
+        current_language = COALESCE(EXCLUDED.current_language, calls.current_language),
+        num_messages = calls.num_messages + 1,
+        user_id = COALESCE(EXCLUDED.user_id, calls.user_id)
+    `, [interactionId, userId, ets, sourceLang || null, targetLang || null]);
+
+    // Step 2: Get call_id
+    const callRow = await client.query(
+      'SELECT id FROM calls WHERE interaction_id = $1',
+      [interactionId]
+    );
+    if (!callRow.rows.length) {
+      logger.warn(`processVoiceResponse: could not find call for interaction_id=${interactionId}`);
+      return;
+    }
+    const callId = callRow.rows[0].id;
+
+    // Step 3: Get current max message_order for this call
+    const maxOrderRow = await client.query(
+      'SELECT COALESCE(MAX(message_order), 0) AS max_order FROM messages WHERE call_id = $1',
+      [callId]
+    );
+    let nextOrder = parseInt(maxOrderRow.rows[0].max_order) + 1;
+
+    // Step 4: Insert messages
+    // Welcome turn: no questionText, only responseText (assistant only)
+    // Normal turn: questionText + responseText (user + assistant)
+    if (questionText && questionText.trim()) {
+      await client.query(`
+        INSERT INTO messages (call_id, role, content, message_order)
+        VALUES ($1, 'user', $2, $3)
+        ON CONFLICT (call_id, message_order) DO NOTHING
+      `, [callId, questionText.trim(), nextOrder]);
+      nextOrder++;
+    }
+
+    if (responseText && responseText.trim()) {
+      await client.query(`
+        INSERT INTO messages (call_id, role, content, message_order)
+        VALUES ($1, 'assistant', $2, $3)
+        ON CONFLICT (call_id, message_order) DO NOTHING
+      `, [callId, responseText.trim(), nextOrder]);
+    }
+
+    // Step 5: Upsert voice_call_tracking
+    await client.query(`
+      INSERT INTO voice_call_tracking (sid, call_id, turns_processed, last_ets)
+      VALUES ($1, $2, 1, $3)
+      ON CONFLICT (sid) DO UPDATE SET
+        turns_processed = voice_call_tracking.turns_processed + 1,
+        last_ets = GREATEST(voice_call_tracking.last_ets, EXCLUDED.last_ets),
+        updated_at = NOW()
+    `, [sid, callId, ets]);
+
+    logger.debug(`processVoiceResponse: sid=${sid}, callId=${callId}, order=${nextOrder}`);
+  } catch (err) {
+    logger.error(`Error processing voice response: ${err.message}`);
+    throw err;
+  }
+}
+
 // Lock to prevent concurrent cron runs
 let isProcessingLogs = false;
 let currentBatchId = null;
@@ -1970,6 +2118,62 @@ app.get("/health", (req, res) => {
     version: process.env.npm_package_version || "1.0.0",
     eventProcessors: Object.keys(eventProcessors).length,
   });
+});
+
+// API endpoint to backfill voice telemetry from existing winston_logs
+app.post("/api/backfill-voice", async (req, res) => {
+  const batchId = `backfill_voice_${Date.now()}`;
+  logger.info(`[${batchId}] Starting voice telemetry backfill...`);
+
+  const client = await pool.connect();
+  let logsProcessed = 0;
+  let voiceEventsProcessed = 0;
+  let errors = 0;
+
+  try {
+    await client.query("BEGIN");
+
+    const result = await client.query(`
+      SELECT id, message, "timestamp" FROM winston_logs
+      WHERE message::text LIKE '%"eid":"OE_VOICE_RESPONSE"%'
+      ORDER BY "timestamp" ASC
+    `);
+
+    logger.info(`[${batchId}] Found ${result.rows.length} logs with voice events`);
+
+    for (const log of result.rows) {
+      try {
+        const events = parseTelemetryMessage(log.message, batchId, 0);
+        for (const event of events) {
+          if (event.eid === 'OE_VOICE_RESPONSE') {
+            await processVoiceResponse(client, event);
+            voiceEventsProcessed++;
+          }
+        }
+        logsProcessed++;
+      } catch (err) {
+        logger.error(`[${batchId}] Error processing log ${log.id}: ${err.message}`);
+        errors++;
+      }
+    }
+
+    await client.query("COMMIT");
+
+    logger.info(`[${batchId}] Backfill complete: ${logsProcessed} logs, ${voiceEventsProcessed} voice events, ${errors} errors`);
+
+    res.status(200).json({
+      success: true,
+      logsProcessed,
+      voiceEventsProcessed,
+      errors,
+    });
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    logger.error(`[${batchId}] Backfill failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    client.release();
+  }
 });
 
 // Function to refresh user location aggregation data
@@ -2205,31 +2409,142 @@ async function refreshMaterializedViews() {
       //     WHERE duration_seconds IS NOT NULL;
       //   `
       // },
-      // {
-      //   name: 'mv_active_users',
-      //   query: `
-      //     CREATE MATERIALIZED VIEW IF NOT EXISTS mv_active_users AS
-      //     SELECT 
-      //         TO_TIMESTAMP(session_start_at / 1000)::DATE as activity_date,
-      //         COUNT(DISTINCT user_id) as active_users
-      //     FROM sessions
-      //     GROUP BY 1;
-      //     CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_active_users_date ON mv_active_users(activity_date);
-      //   `
-      // },
-      // {
-      //   name: 'mv_performance_metrics',
-      //   query: `
-      //     CREATE MATERIALIZED VIEW IF NOT EXISTS mv_performance_metrics AS
-      //     SELECT 
-      //         AVG(render_duration_ms) as avg_render_ms,
-      //         AVG(server_duration_ms) as avg_server_ms,
-      //         MAX(render_duration_ms) as max_render_ms,
-      //         MAX(server_duration_ms) as max_server_ms
-      //     FROM sessions
-      //     WHERE render_duration_ms IS NOT NULL OR server_duration_ms IS NOT NULL;
-      //   `
-      // }
+      // Dashboard Analytics MVs - Added 2024-04-16
+      // High-impact aggregations for dashboard stats performance
+      // NOTE: Queries match bh-dev-2 schema (migration SQL is authoritative)
+      {
+        name: 'mv_daily_call_stats',
+        query: `
+          CREATE MATERIALIZED VIEW IF NOT EXISTS mv_daily_call_stats AS
+          SELECT
+            DATE(c.start_datetime) AS call_date,
+            COALESCE(c.channel_direction, 'unknown') AS channel,
+            COUNT(*) AS total_calls,
+            COUNT(DISTINCT c.user_id) AS unique_users,
+            AVG(EXTRACT(EPOCH FROM (c.end_datetime - c.start_datetime))) AS avg_duration_seconds,
+            MIN(EXTRACT(EPOCH FROM (c.end_datetime - c.start_datetime))) AS min_duration_seconds,
+            MAX(EXTRACT(EPOCH FROM (c.end_datetime - c.start_datetime))) AS max_duration_seconds,
+            COUNT(CASE WHEN c.end_reason IS NULL OR c.end_reason = 'completed' THEN 1 END) AS completed_calls,
+            COUNT(CASE WHEN c.end_reason IS NOT NULL AND c.end_reason != 'completed' THEN 1 END) AS failed_calls
+          FROM calls c
+          WHERE c.start_datetime IS NOT NULL AND c.end_datetime IS NOT NULL
+          GROUP BY DATE(c.start_datetime), COALESCE(c.channel_direction, 'unknown');
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_daily_call_stats_date_channel ON mv_daily_call_stats(call_date, channel);
+        `
+      },
+      {
+        name: 'mv_user_engagement_daily',
+        query: `
+          CREATE MATERIALIZED VIEW IF NOT EXISTS mv_user_engagement_daily AS
+          SELECT
+            DATE(TO_TIMESTAMP(s.session_start_at / 1000)) AS activity_date,
+            COUNT(DISTINCT s.user_id) AS daily_active_users,
+            COUNT(DISTINCT s.user_id) AS daily_devices,
+            COUNT(*) AS total_sessions,
+            AVG(s.duration_seconds) AS avg_session_duration,
+            COUNT(DISTINCT CASE WHEN s.channel = 'voice' THEN s.user_id END) AS voice_users,
+            COUNT(DISTINCT CASE WHEN s.channel = 'chat' THEN s.user_id END) AS chat_users
+          FROM sessions s
+          WHERE s.session_start_at IS NOT NULL
+          GROUP BY DATE(TO_TIMESTAMP(s.session_start_at / 1000));
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_user_engagement_daily_date ON mv_user_engagement_daily(activity_date);
+        `
+      },
+      {
+        name: 'mv_question_answer_rates',
+        query: `
+          CREATE MATERIALIZED VIEW IF NOT EXISTS mv_question_answer_rates AS
+          SELECT
+            DATE(TO_TIMESTAMP(q.ets / 1000)) AS question_date,
+            COALESCE(q.channel, 'unknown') AS channel,
+            COUNT(*) AS total_questions,
+            COUNT(DISTINCT q.uid) AS unique_users,
+            COUNT(CASE WHEN q.answertext IS NOT NULL AND q.answertext != '' THEN 1 END) AS answered_questions,
+            ROUND(
+              COUNT(CASE WHEN q.answertext IS NOT NULL AND q.answertext != '' THEN 1 END) * 100.0 / NULLIF(COUNT(*), 0),
+              2
+            ) AS answer_rate_pct,
+            COUNT(f.id) AS feedback_count,
+            COUNT(CASE WHEN f.feedbacktype = 'like' THEN 1 END) AS likes,
+            COUNT(CASE WHEN f.feedbacktype = 'dislike' THEN 1 END) AS dislikes
+          FROM questions q
+          LEFT JOIN feedback f ON q.sid = f.sid AND q.ets = f.ets
+          GROUP BY DATE(TO_TIMESTAMP(q.ets / 1000)), COALESCE(q.channel, 'unknown');
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_question_answer_rates_date_channel ON mv_question_answer_rates(question_date, channel);
+        `
+      },
+      {
+        name: 'mv_channel_performance',
+        query: `
+          CREATE MATERIALIZED VIEW IF NOT EXISTS mv_channel_performance AS
+          SELECT
+            DATE(TO_TIMESTAMP(s.session_start_at / 1000)) AS performance_date,
+            COALESCE(s.channel, 'unknown') AS channel,
+            COUNT(DISTINCT s.user_id) AS users,
+            COUNT(*) AS sessions,
+            SUM(CASE WHEN c.id IS NOT NULL THEN 1 ELSE 0 END) AS calls,
+            SUM(CASE WHEN m.id IS NOT NULL THEN 1 ELSE 0 END) AS messages,
+            AVG(CASE WHEN c.duration_in_seconds IS NOT NULL THEN c.duration_in_seconds END) AS avg_call_duration
+          FROM sessions s
+          LEFT JOIN calls c ON s.user_id = c.user_id AND DATE(TO_TIMESTAMP(s.session_start_at / 1000)) = DATE(c.start_datetime)
+          LEFT JOIN messages m ON m.call_id = c.id
+          WHERE s.session_start_at IS NOT NULL
+          GROUP BY DATE(TO_TIMESTAMP(s.session_start_at / 1000)), COALESCE(s.channel, 'unknown');
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_channel_performance_date_channel ON mv_channel_performance(performance_date, channel);
+        `
+      },
+      // Call Logs Optimization: Pre-computed call-message aggregations
+      {
+        name: 'mv_call_message_counts',
+        query: `
+          CREATE MATERIALIZED VIEW IF NOT EXISTS mv_call_message_counts AS
+          SELECT
+            c.id,
+            c.user_id,
+            c.duration_in_seconds,
+            c.start_datetime,
+            c.channel_direction,
+            c.end_reason,
+            c.language_name,
+            COUNT(m.id) AS total_interactions,
+            COUNT(m.id) FILTER (WHERE m.role = 'user') AS questions_count
+          FROM calls c
+          LEFT JOIN messages m ON m.call_id = c.id
+          GROUP BY c.id, c.user_id, c.duration_in_seconds, c.start_datetime, c.channel_direction, c.end_reason, c.language_name;
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_call_message_counts_id ON mv_call_message_counts(id);
+          CREATE INDEX IF NOT EXISTS idx_mv_call_message_counts_start_datetime ON mv_call_message_counts(start_datetime);
+          CREATE INDEX IF NOT EXISTS idx_mv_call_message_counts_user_id ON mv_call_message_counts(user_id);
+        `
+      },
+      // Enabled Legacy MVs (High ROI)
+      {
+        name: 'mv_active_users',
+        query: `
+          CREATE MATERIALIZED VIEW IF NOT EXISTS mv_active_users AS
+          SELECT
+            DATE(TO_TIMESTAMP(session_start_at / 1000)) AS activity_date,
+            COUNT(DISTINCT user_id) AS active_users
+          FROM sessions
+          WHERE session_start_at IS NOT NULL
+          GROUP BY DATE(TO_TIMESTAMP(session_start_at / 1000));
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_active_users_date ON mv_active_users(activity_date);
+        `
+      },
+      {
+        name: 'mv_session_duration',
+        query: `
+          CREATE MATERIALIZED VIEW IF NOT EXISTS mv_session_duration AS
+          SELECT
+            COUNT(*) AS total_sessions,
+            AVG(duration_seconds) AS avg_duration,
+            MIN(duration_seconds) AS min_duration,
+            MAX(duration_seconds) AS max_duration,
+            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY duration_seconds) AS p50_duration,
+            PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_seconds) AS p95_duration
+          FROM sessions
+          WHERE duration_seconds IS NOT NULL AND duration_seconds > 0;
+        `
+      }
     ];
 
     // Ensure all MVs exist
@@ -2403,6 +2718,7 @@ module.exports = {
   processTelemetryLogsFast,
   ensureTablesExist,
   parseTelemetryMessage,
+  processVoiceResponse,
 };
 
 // Only start server if this file is run directly (not when required in tests)

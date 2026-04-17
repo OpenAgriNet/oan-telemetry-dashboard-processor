@@ -1578,8 +1578,9 @@ async function processTelemetryLogsFast(batchId = `fast_${Date.now()}`) {
           for (const { key, processor } of orderedProcessors) {
             const verified = getNestedValue(event, processor["fieldVerification"]);
 
-            // Skip questions processor for ASR/TTS events
-            if (processor["tableName"] === 'questions' && (hasAsrResponse || hasTtsResponse)) {
+            // Skip questions processor for ASR/TTS/voice events
+            const hasVoiceResponse = getNestedValue(event, 'edata.eks.target.questionsDetails.responseText');
+            if (processor["tableName"] === 'questions' && (hasAsrResponse || hasTtsResponse || hasVoiceResponse)) {
               continue;
             }
 
@@ -1587,7 +1588,8 @@ async function processTelemetryLogsFast(batchId = `fast_${Date.now()}`) {
               if (processor["tableName"] === "questions") {
                 const hasTtsData = getNestedValue(event, "edata.eks.target.ttsResponseDetails");
                 const hasAsrData = getNestedValue(event, "edata.eks.target.asrResponseDetails");
-                if (hasTtsData !== undefined || hasAsrData !== undefined) {
+                const hasVoiceData = getNestedValue(event, "edata.eks.target.questionsDetails.responseText");
+                if (hasTtsData !== undefined || hasAsrData !== undefined || hasVoiceData !== undefined) {
                   continue;
                 }
               }

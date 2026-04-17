@@ -127,7 +127,7 @@ const pool = new Pool({
 // })();
 
 const PORT = process.env.PORT || 3000;
-const BATCH_SIZE = process.env.BATCH_SIZE || 10;
+const BATCH_SIZE = parseInt(process.env.BATCH_SIZE || '10', 10);
 const CRON_SCHEDULE = process.env.CRON_SCHEDULE || "*/5 * * * *";
 // const LEADERBOARD_REFRESH_SCHEDULE =
 // process.env.LEADERBOARD_REFRESH_SCHEDULE || "0 1 * * *"; // Run at 1 AM every day
@@ -1133,7 +1133,7 @@ async function processUserData(client, event) {
     const eventTimestamp = new Date(Number(event.ets));
 
     // Use fingerprint device_id as uid if available, otherwise fallback to event.uid
-    let uid = fingerprint?.device_id ? `fp_${fingerprint.device_id} ` : event.uid;
+    let uid = fingerprint?.device_id ? `fp_${fingerprint.device_id}` : event.uid;
 
     if (!uid || uid === 'guest') {
       logger.debug(`Skipping user upsert - no fingerprint and uid is guest / empty`);
@@ -1324,26 +1324,18 @@ function parseTelemetryMessage(message, batchId = '', logIndex = 0) {
   }
 }
 
-// Process telemetry logs
+// Process telemetry logs — processes in smaller transaction batches for fault tolerance
+const SLOW_BATCH_SIZE = parseInt(process.env.SLOW_BATCH_SIZE || '1000', 10);
+
 async function processTelemetryLogs(batchId = `batch_${Date.now()} `) {
-  logger.info(`[${batchId}] Step 1: Acquiring database connection...`);
-  const client = await pool.connect();
-  logger.info(`[${batchId}] Step 1: Database connection acquired`);
+  logger.info(`[${batchId}] Step 1: Fetching unprocessed logs (BATCH_SIZE: ${BATCH_SIZE})...`);
 
-  let processedCount = 0;
-  let totalEventsProcessed = 0;
-  let deadLetterCount = 0;
-
+  // Fetch logs outside a transaction (read-only, no lock needed)
+  const fetchClient = await pool.connect();
+  let allRows;
   try {
-    // Begin transaction
-    logger.info(`[${batchId}] Step 2: Beginning database transaction...`);
-    await client.query("BEGIN");
-    logger.info(`[${batchId}] Step 2: Transaction started`);
-
-    // Get unprocessed logs
-    logger.info(`[${batchId}] Step 3: Fetching unprocessed logs(BATCH_SIZE: ${BATCH_SIZE})...`);
     const queryStartTime = Date.now();
-    const result = await client.query(
+    const result = await fetchClient.query(
       `SELECT id, level, message, meta, cast(to_char(("timestamp"):: TIMESTAMP, 'yyyymmddhhmiss') as BigInt) as timestamp, sync_status FROM winston_logs 
        WHERE sync_status = 0 
        ORDER BY "timestamp" ASC 
@@ -1351,200 +1343,148 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()} `) {
       [BATCH_SIZE]
     );
     const queryDuration = Date.now() - queryStartTime;
-    logger.info(`[${batchId}] Step 3: Query completed in ${queryDuration} ms, found ${result.rows.length} logs`);
+    logger.info(`[${batchId}] Step 1: Fetch completed in ${queryDuration}ms, found ${result.rows.length} logs`);
+    allRows = result.rows;
+  } finally {
+    fetchClient.release();
+  }
 
-    if (result.rows.length === 0) {
-      logger.info(`[${batchId}] Step 4: No new telemetry logs to process - committing empty transaction`);
-      await client.query("COMMIT");
-      logger.info(`[${batchId}] Step 4: Empty transaction committed`);
-      return { processed: 0, status: "success" };
-    }
+  if (allRows.length === 0) {
+    logger.info(`[${batchId}] No new logs to process`);
+    return { processed: 0, status: "success" };
+  }
 
-    logger.info(`[${batchId}] Step 4: Starting to process ${result.rows.length} telemetry logs`);
+  let totalProcessed = 0;
+  let totalEventsProcessed = 0;
+  let totalDeadLetter = 0;
+  let batchIndex = 0;
 
-    // Process each log
-    for (let logIndex = 0; logIndex < result.rows.length; logIndex++) {
-      const log = result.rows[logIndex];
-      const logStartTime = Date.now();
-      logger.info(`[${batchId}][Log ${logIndex + 1}/${result.rows.length}] Processing log(timestamp: ${log.timestamp}, level: ${log.level})`);
+  // Process in smaller transaction batches for fault tolerance
+  for (let i = 0; i < allRows.length; i += SLOW_BATCH_SIZE) {
+    batchIndex++;
+    const chunk = allRows.slice(i, i + SLOW_BATCH_SIZE);
+    const client = await pool.connect();
+    const batchStart = Date.now();
 
-      const events = parseTelemetryMessage(log.message, batchId, logIndex + 1);
-      logger.info(`[${batchId}][Log ${logIndex + 1}] Parsed ${events.length} events from message`);
+    try {
+      await client.query("BEGIN");
+      logger.info(`[${batchId}][Batch-${batchIndex}] Processing ${chunk.length} logs...`);
 
-      if (events.length === 0) {
-        logger.warn(`[${batchId}][Log ${logIndex + 1}] No events found in message - skipping to sync status update`);
-      }
+      for (let logIndex = 0; logIndex < chunk.length; logIndex++) {
+        const log = chunk[logIndex];
+        const events = parseTelemetryMessage(log.message, batchId, logIndex + 1);
 
-      for (let eventIndex = 0; eventIndex < events.length; eventIndex++) {
-        const event = events[eventIndex];
-        const eventType = event.eid;
-        const eventUid = event.uid || 'unknown';
-        const eventMid = event.mid || 'unknown';
-        logger.debug(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}/${events.length}] Processing event type: ${eventType}, uid: ${eventUid}, mid: ${eventMid} `);
+        for (const event of events) {
+          const eventType = event.eid;
+          const eventUid = event.uid || 'unknown';
+          const eventMid = event.mid || 'unknown';
 
-        // Handle voice telemetry events
-        if (eventType === 'OE_VOICE_RESPONSE') {
-          await processVoiceResponse(client, event);
-          eventProcessed = true;
-          totalEventsProcessed++;
-          continue;
-        }
+          let eventProcessed = false;
 
-        // Check if this is a TTS, ASR, or TeleFeedback event
-        const hasTtsResponse = getNestedValue(event, 'edata.eks.target.ttsResponseDetails');
-        const hasAsrResponse = getNestedValue(event, 'edata.eks.target.asrResponseDetails');
-        const hasTeleFeedback = getNestedValue(event, 'edata.eks.target.telefeedbackDetails');
-
-        let eventProcessed = false;
-        let matchedProcessor = null;
-
-        // PRIORITY CHECK: Process ASR/TTS events first (they have higher priority)
-        // This prevents them from being consumed by the questions processor
-        const priorityProcessors = [];
-        const regularProcessors = [];
-
-        // Separate priority processors from regular ones
-        for (const key in eventProcessors) {
-          const processor = eventProcessors[key];
-          if (processor["tableName"] === 'tts_details' || processor["tableName"] === 'asr_details') {
-            priorityProcessors.push({ key, processor });
-          } else {
-            regularProcessors.push({ key, processor });
-          }
-        }
-
-        // Combine: priority processors first, then regular ones
-        const orderedProcessors = [...priorityProcessors, ...regularProcessors];
-
-        for (const { key, processor } of orderedProcessors) {
-          const verified = getNestedValue(
-            event,
-            processor["fieldVerification"]
-          );
-
-          logger.debug(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}] Checking processor '${key}': eventType match = ${processor["eventType"] === eventType}, verified = ${verified !== undefined} `);
-
-          // CRITICAL: Skip questions processor if ASR/TTS/voice response/TeleFeedback exists
-          // This prevents ASR/TTS/voice/TeleFeedback events from being consumed by questions processor
-          const hasVoiceResponse = getNestedValue(event, 'edata.eks.target.questionsDetails.responseText');
-          if (processor["tableName"] === 'questions' && (hasAsrResponse || hasTtsResponse || hasVoiceResponse || hasTeleFeedback)) {
+          // Handle voice telemetry events
+          if (eventType === 'OE_VOICE_RESPONSE') {
+            await processVoiceResponse(client, event);
+            eventProcessed = true;
+            totalEventsProcessed++;
             continue;
           }
 
-          if (
-            processor["eventType"] === eventType &&
-            verified !== undefined &&
-            !eventProcessed
-          ) {
-            // Skip the 'questions' processor for events that have TTS or ASR data
-            // to prevent TTS/ASR events from being duplicated into the questions table
-            if (processor["tableName"] === "questions") {
-              const hasTtsData = getNestedValue(event, "edata.eks.target.ttsResponseDetails");
-              const hasAsrData = getNestedValue(event, "edata.eks.target.asrResponseDetails");
-              const hasTeleFeedbackData = getNestedValue(event, "edata.eks.target.telefeedbackDetails");
-              if (hasTtsData !== undefined || hasAsrData !== undefined || hasTeleFeedbackData !== undefined) {
-                logger.debug(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}] Skipping 'questions' processor for TTS/ASR/TeleFeedback event`);
-                continue;
+          const hasTtsResponse = getNestedValue(event, 'edata.eks.target.ttsResponseDetails');
+          const hasAsrResponse = getNestedValue(event, 'edata.eks.target.asrResponseDetails');
+          const hasTeleFeedback = getNestedValue(event, 'edata.eks.target.telefeedbackDetails');
+
+          const priorityProcessors = [];
+          const regularProcessors = [];
+          for (const key in eventProcessors) {
+            const processor = eventProcessors[key];
+            if (processor["tableName"] === 'tts_details' || processor["tableName"] === 'asr_details') {
+              priorityProcessors.push({ key, processor });
+            } else {
+              regularProcessors.push({ key, processor });
+            }
+          }
+          const orderedProcessors = [...priorityProcessors, ...regularProcessors];
+
+          for (const { key, processor } of orderedProcessors) {
+            const verified = getNestedValue(event, processor["fieldVerification"]);
+
+            const hasVoiceResponse = getNestedValue(event, 'edata.eks.target.questionsDetails.responseText');
+            if (processor["tableName"] === 'questions' && (hasAsrResponse || hasTtsResponse || hasVoiceResponse || hasTeleFeedback)) {
+              continue;
+            }
+
+            if (processor["eventType"] === eventType && verified !== undefined && !eventProcessed) {
+              if (processor["tableName"] === "questions") {
+                const hasTtsData = getNestedValue(event, "edata.eks.target.ttsResponseDetails");
+                const hasAsrData = getNestedValue(event, "edata.eks.target.asrResponseDetails");
+                const hasTeleFeedbackData = getNestedValue(event, "edata.eks.target.telefeedbackDetails");
+                if (hasTtsData !== undefined || hasAsrData !== undefined || hasTeleFeedbackData !== undefined) {
+                  continue;
+                }
               }
+
+              await processor["process"](client, event);
+              eventProcessed = true;
+              totalEventsProcessed++;
+              break;
             }
+          }
 
-            matchedProcessor = key;
-            logger.info(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}]mid: ${eventMid} - Matched processor '${key}' for event type '${eventType}'`);
-
-            const processorStartTime = Date.now();
-            await processor["process"](client, event);
-            const processorDuration = Date.now() - processorStartTime;
-
-            logger.info(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}]mid: ${eventMid} - Processor '${key}' completed in ${processorDuration} ms`);
-            eventProcessed = true;
-            totalEventsProcessed++;
-            break;
+          if (eventType !== "OE_END" && eventType !== "OE_START" && !eventProcessed) {
+            await client.query(
+              `Insert into dead_letter_logs(level, message, meta, event_name) values($1, $2, $3, $4)`,
+              [log.level, JSON.stringify(event), log.meta, eventType]
+            );
+            totalDeadLetter++;
+          } else if (eventType === "OE_START") {
+            try {
+              await processUserData(client, event);
+            } catch (v2Err) {
+              logger.error(`[${batchId}][Batch-${batchIndex}] V2 OE_START error: ${v2Err.message}`);
+            }
+          } else if (eventType === "OE_END") {
+            try {
+              const fingerprint = event.edata?.eks?.fingerprint_details;
+              const uid = fingerprint?.device_id ? `fp_${fingerprint.device_id}` : event.uid;
+              if (uid && uid !== 'guest') {
+                await client.query(`UPDATE users SET last_seen_at = NOW() WHERE uid = $1`, [uid]);
+              }
+            } catch (v2Err) {
+              logger.error(`[${batchId}][Batch-${batchIndex}] V2 OE_END error: ${v2Err.message}`);
+            }
           }
         }
 
-        if (
-          eventType !== "OE_END" &&
-          eventType !== "OE_START" &&
-          eventProcessed === false
-        ) {
-          logger.warn(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}]mid: ${eventMid} - No processor matched for event type: ${eventType} - sending to dead letter queue`);
-          logger.debug(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}]mid: ${eventMid} - Dead letter event uid: ${eventUid}, channel: ${event.channel || 'unknown'} `);
-
-          await client.query(
-            `Insert into dead_letter_logs(level, message, meta, event_name) values($1, $2, $3, $4)`,
-            [log.level, JSON.stringify(event), log.meta, eventType]
-          );
-          deadLetterCount++;
-          logger.info(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}] Event inserted into dead_letter_logs`);
-        } else if (eventType === "OE_START") {
-          // V2: Process OE_START for user/session creation (device metadata stored in users)
-          logger.info(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}] Processing OE_START for V2(user / session)`);
-          try {
-            const fingerprint = event.edata?.eks?.fingerprint_details;
-            const uid = fingerprint?.device_id ? `fp_${fingerprint.device_id}` : event.uid;
-            await processUserData(client, event);
-            // await processSessionStart(client, event, uid);
-            logger.info(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}] V2 OE_START processed: uid = ${uid} `);
-          } catch (v2Err) {
-            logger.error(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}] V2 OE_START error: ${v2Err.message} `);
-          }
-        } else if (eventType === "OE_END") {
-          // V2: Process OE_END to update session with end time and performance
-          logger.info(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}] Processing OE_END for V2(session end)`);
-          try {
-            // await processSessionEnd(client, event);
-            // Update user's last_seen_at with fingerprint-based uid
-            const fingerprint = event.edata?.eks?.fingerprint_details;
-            const uid = fingerprint?.device_id ? `fp_${fingerprint.device_id}` : event.uid;
-            if (uid && uid !== 'guest') {
-              await client.query(`
-                UPDATE users SET last_seen_at = NOW() WHERE uid = $1
-  `, [uid]);
-            }
-            logger.info(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}] V2 OE_END processed`);
-          } catch (v2Err) {
-            logger.error(`[${batchId}][Log ${logIndex + 1}][Event ${eventIndex + 1}] V2 OE_END error: ${v2Err.message} `);
-          }
-        }
+        await client.query(
+          `UPDATE winston_logs SET sync_status = 1 WHERE id = $1`,
+          [log.id]
+        );
       }
 
-      // Update sync status for processed log
-      logger.debug(`[${batchId}][Log ${logIndex + 1}] Updating sync_status to 1 for processed log...`);
-      await client.query(
-        `UPDATE winston_logs SET sync_status = 1 WHERE id = $1`,
-        [log.id]
-      );
+      await client.query("COMMIT");
+      totalProcessed += chunk.length;
 
-      const logDuration = Date.now() - logStartTime;
-      processedCount++;
-      logger.info(`[${batchId}][Log ${logIndex + 1}] Log processing completed in ${logDuration} ms, sync_status updated`);
+      const batchDuration = Date.now() - batchStart;
+      logger.info(`[${batchId}][Batch-${batchIndex}] Committed ${chunk.length} logs in ${batchDuration}ms`);
+
+    } catch (err) {
+      await client.query("ROLLBACK");
+      const batchDuration = Date.now() - batchStart;
+      logger.error(`[${batchId}][Batch-${batchIndex}] FAILED after ${batchDuration}ms: ${err.message}`);
+      // Continue with next batch — partial progress is preserved
+    } finally {
+      client.release();
     }
-
-    // Commit transaction
-    logger.info(`[${batchId}] Step 5: Committing transaction...`);
-    await client.query("COMMIT");
-    logger.info(`[${batchId}] Step 5: Transaction committed successfully`);
-
-    logger.info(`[${batchId}] ========== PROCESSING SUMMARY ==========`);
-    logger.info(`[${batchId}] Logs processed: ${processedCount} `);
-    logger.info(`[${batchId}] Total events processed: ${totalEventsProcessed} `);
-    logger.info(`[${batchId}] Dead letter events: ${deadLetterCount} `);
-    logger.info(`[${batchId}] ========================================== `);
-
-    return { processed: result.rows.length, status: "success", eventsProcessed: totalEventsProcessed, deadLetterCount };
-  } catch (err) {
-    logger.error(`[${batchId}] Step ERROR: Rolling back transaction due to error...`);
-    await client.query("ROLLBACK");
-    logger.error(`[${batchId}] Step ERROR: Transaction rolled back`);
-    logger.error(`[${batchId}] Error details: ${err.message} `);
-    logger.error(`[${batchId}] Error stack: ${err.stack} `);
-    logger.error(`[${batchId}] Processed before error: ${processedCount} logs, ${totalEventsProcessed} events`);
-    return { processed: 0, status: "error", error: err.message };
-  } finally {
-    logger.info(`[${batchId}] Step FINAL: Releasing database connection...`);
-    client.release();
-    logger.info(`[${batchId}] Step FINAL: Database connection released`);
   }
+
+  logger.info(`[${batchId}] ========== PROCESSING SUMMARY ==========`);
+  logger.info(`[${batchId}] Logs processed: ${totalProcessed}/${allRows.length}`);
+  logger.info(`[${batchId}] Total events processed: ${totalEventsProcessed}`);
+  logger.info(`[${batchId}] Dead letter events: ${totalDeadLetter}`);
+  logger.info(`[${batchId}] Transaction batches: ${batchIndex} (size: ${SLOW_BATCH_SIZE})`);
+  logger.info(`[${batchId}] ==========================================`);
+
+  return { processed: totalProcessed, status: "success", eventsProcessed: totalEventsProcessed, deadLetterCount: totalDeadLetter };
 }
 
 // ============================================
@@ -1599,6 +1539,7 @@ async function processTelemetryLogsFast(batchId = `fast_${Date.now()}`) {
       const userUpsertMap = new Map(); // uid -> {event, fingerprint, eventTimestamp}
       const userLastSeenMap = new Map(); // uid -> true (for OE_END events)
       const processedIds = [];
+      const voiceEvents = []; // Collect voice events for batched processing
 
       for (const log of chunk) {
         const events = parseTelemetryMessage(log.message, batchId, 0);
@@ -1608,9 +1549,9 @@ async function processTelemetryLogsFast(batchId = `fast_${Date.now()}`) {
 
           let eventProcessed = false;
 
-          // Handle voice telemetry events
+          // Collect voice telemetry events for batched processing
           if (eventType === 'OE_VOICE_RESPONSE') {
-            await processVoiceResponse(client, event);
+            voiceEvents.push(event);
             eventProcessed = true;
             totalEventsProcessed++;
             continue;
@@ -1732,10 +1673,15 @@ async function processTelemetryLogsFast(batchId = `fast_${Date.now()}`) {
         );
       }
 
+      // Batch process voice events (reduces queries from O(n*5) to O(5))
+      if (voiceEvents.length > 0) {
+        await processVoiceResponseBatch(client, voiceEvents, batchId);
+      }
+
       // Batch update sync_status for all processed logs in this micro-batch
       if (processedIds.length > 0) {
         await client.query(
-          `UPDATE winston_logs SET sync_status = 1 WHERE id = ANY($1::integer[])`,
+          `UPDATE winston_logs SET sync_status = 1 WHERE id = ANY($1::uuid[])`,
           [processedIds]
         );
       }
@@ -1767,125 +1713,9 @@ async function processTelemetryLogsFast(batchId = `fast_${Date.now()}`) {
   return { processed: totalProcessed, status: "success", eventsProcessed: totalEventsProcessed, deadLetterCount: totalDeadLetter };
 }
 
-// question
-// Process OE_ITEM_RESPONSE data
-async function processQuestionData(client, event) {
-  try {
-    // Extract required fields
-    const uid = event.uid;
-    const sid = event.sid;
-    const groupDetails =
-      event.edata?.eks?.target?.questionsDetails?.groupDetails || [];
-    const channel = event.channel;
-    const ets = event.ets;
-    const questionText =
-      event.edata?.eks?.target?.questionsDetails?.questionText;
-    const questionSource =
-      event.edata?.eks?.target?.questionsDetails?.questionSource;
-    const answerText = event.edata?.eks?.target?.questionsDetails?.answerText;
-    const answer = answerText?.answer;
-
-    // Insert data into questions table
-    // await client.query(
-    //   `INSERT INTO questions(
-    //     uid, sid, group_details, channel, ets, 
-    //     question_text, question_source, answer_text, answer, is_new
-    //   ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-    //   [
-    //     uid,
-    //     sid,
-    //     JSON.stringify(groupDetails),
-    //     channel,
-    //     ets,
-    //     questionText,
-    //     questionSource,
-    //     JSON.stringify(answerText),
-    //     answer,
-    //   ]
-    // );
-
-    await client.query(
-      `
- INSERT INTO questions (
-  uid, sid, groupdetails, channel, ets,
-  questiontext, questionsource, answertext, answer, is_new
-)
-VALUES (
-  $1, $2, $3, $4, $5, $6, $7, $8, $9, 1
-)
-ON CONFLICT (uid)
-DO UPDATE
-SET is_new = 0;
-  `,
-      [
-        uid,
-        sid,
-        JSON.stringify(groupDetails),
-        channel,
-        ets,
-        questionText,
-        questionSource,
-        JSON.stringify(answerText),
-        answer,
-      ]
-    );
-
-    logger.info(
-      `Processed question data for uid: ${uid}, question: ${questionText?.substring(
-        0,
-        30
-      )}...`
-    );
-  } catch (err) {
-    logger.error("Error processing question data:", err);
-    throw err;
-  }
-}
-
-// Process Feedback data
-async function processFeedbackData(client, event) {
-  try {
-    // Extract required fields
-    const uid = event.uid;
-    const sid = event.sid;
-    const groupDetails = event.edata?.eks?.groupDetails || [];
-    const channel = event.channel;
-    const ets = event.ets;
-    const feedbackText = event.edata?.eks?.feedbackText;
-    const sessionId = event.edata?.eks?.sessionId;
-    const questionText = event.edata?.eks?.questionText;
-    const answerText = event.edata?.eks?.answerText;
-    const feedbackType = event.edata?.eks?.feedbackType;
-
-    // Insert data into feedback table
-    await client.query(
-      `INSERT INTO feedback (
-        uid, sid, group_details, channel, ets,
-        feedback_text, session_id, question_text, 
-        answer_text, feedback_type
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-      [
-        uid,
-        sid,
-        JSON.stringify(groupDetails),
-        channel,
-        ets,
-        feedbackText,
-        sessionId,
-        questionText,
-        answerText,
-        feedbackType,
-      ]
-    );
-
-    logger.info(
-      `Processed feedback data for uid: ${uid}, feedback type: ${feedbackType}`
-    );
-  } catch (err) {
-    logger.error("Error processing feedback data:", err);
-    throw err;
-  }
-}
+// NOTE: processQuestionData and processFeedbackData are legacy dead code.
+// Actual processing is handled via dynamic eventProcessors loaded from the database.
+// Kept as reference only — do not call directly.
 
 /**
  * Process a single OE_VOICE_RESPONSE telemetry event into calls + messages tables.
@@ -1991,6 +1821,203 @@ async function processVoiceResponse(client, event) {
   }
 }
 
+/**
+ * Batch process multiple OE_VOICE_RESPONSE events in a single micro-batch.
+ * Reduces queries from O(n*5) to O(5) by batching all operations.
+ * Chunks all operations to stay under PostgreSQL's 65535 parameter limit.
+ *
+ * @param {Object} client - Database client
+ * @param {Array} events - Array of OE_VOICE_RESPONSE events
+ * @param {string} batchId - Batch ID for logging
+ * @returns {number} Number of events processed
+ */
+async function processVoiceResponseBatch(client, events, batchId) {
+  if (events.length === 0) return 0;
+
+  const batchStart = Date.now();
+  let processed = 0;
+  const VOICE_BATCH_CHUNK = 5000;
+
+  try {
+    // Process voice events in chunks to stay under PG parameter limit
+    for (let chunkStart = 0; chunkStart < events.length; chunkStart += VOICE_BATCH_CHUNK) {
+      const chunk = events.slice(chunkStart, chunkStart + VOICE_BATCH_CHUNK);
+
+      // Deduplicate by sid — multiple events can share same sid (same call, different turns)
+      const callAgg = new Map(); // sid -> {event, turnCount}
+      for (const event of chunk) {
+        const sid = event.sid;
+        if (!sid || !event.ets) continue;
+        if (!callAgg.has(sid)) {
+          callAgg.set(sid, { event, turnCount: 0 });
+        }
+        callAgg.get(sid).turnCount++;
+      }
+
+      // Step 1: Batch upsert calls (one row per unique sid)
+      const callValues = [];
+      const callPlaceholders = [];
+      const callSids = new Set();
+
+      for (const [sid, { event, turnCount }] of callAgg) {
+        const uid = event.uid || 'guest';
+        const ets = event.ets;
+        const sourceLang = event.edata?.eks?.target?.questionsDetails?.sourceLang;
+        const targetLang = event.edata?.eks?.target?.questionsDetails?.targetLang;
+
+        const userId = (uid === 'guest' || !uid) ? null : uid;
+        const idx = callValues.length / 5;
+        callPlaceholders.push(`($${idx * 5 + 1}, $${idx * 5 + 2}, to_timestamp($${idx * 5 + 3} / 1000.0), to_timestamp($${idx * 5 + 3} / 1000.0), 0, $${idx * 5 + 4}, $${idx * 5 + 5}, ${turnCount}, 'voice', 'voice')`);
+        callValues.push(sid, userId, ets, sourceLang || null, targetLang || null);
+        callSids.add(sid);
+      }
+
+      if (callValues.length > 0) {
+        await client.query(`
+          INSERT INTO calls (
+            interaction_id, user_id, start_datetime, end_datetime,
+            duration_in_seconds, language_name, current_language,
+            num_messages, channel_type, source
+          ) VALUES ${callPlaceholders.join(', ')}
+          ON CONFLICT (interaction_id) DO UPDATE SET
+            end_datetime = GREATEST(EXCLUDED.end_datetime, calls.end_datetime),
+            start_datetime = LEAST(EXCLUDED.start_datetime, calls.start_datetime),
+            duration_in_seconds = EXTRACT(EPOCH FROM (
+              GREATEST(EXCLUDED.end_datetime, calls.end_datetime) -
+              LEAST(EXCLUDED.start_datetime, calls.start_datetime)
+            )),
+            language_name = COALESCE(EXCLUDED.language_name, calls.language_name),
+            current_language = COALESCE(EXCLUDED.current_language, calls.current_language),
+            num_messages = calls.num_messages + EXCLUDED.num_messages,
+            user_id = COALESCE(EXCLUDED.user_id, calls.user_id)
+        `, callValues);
+      }
+
+      // Step 2: Batch fetch call IDs for this chunk
+      const sidArray = Array.from(callSids);
+      const callIdMap = new Map();
+      const SID_CHUNK = 5000;
+
+      for (let i = 0; i < sidArray.length; i += SID_CHUNK) {
+        const batch = sidArray.slice(i, i + SID_CHUNK);
+        const callRows = await client.query(
+          'SELECT id, interaction_id FROM calls WHERE interaction_id = ANY($1::text[])',
+          [batch]
+        );
+        for (const row of callRows.rows) {
+          callIdMap.set(row.interaction_id, row.id);
+        }
+      }
+
+      // Step 3: Batch fetch max message orders for this chunk
+      const callIds = Array.from(callIdMap.values());
+      const maxOrderMap = new Map();
+
+      if (callIds.length > 0) {
+        const CID_CHUNK = 5000;
+        for (let i = 0; i < callIds.length; i += CID_CHUNK) {
+          const batch = callIds.slice(i, i + CID_CHUNK);
+          const orderRows = await client.query(`
+            SELECT call_id, COALESCE(MAX(message_order), 0) AS max_order
+            FROM messages
+            WHERE call_id = ANY($1::integer[])
+            GROUP BY call_id
+          `, [batch]);
+
+          for (const row of orderRows.rows) {
+            maxOrderMap.set(row.call_id, parseInt(row.max_order));
+          }
+        }
+      }
+
+      // Step 4: Batch insert messages for this chunk
+      const msgValues = [];
+      const msgPlaceholders = [];
+
+      for (const event of chunk) {
+        const sid = event.sid;
+        const callId = callIdMap.get(sid);
+        if (!callId) continue;
+
+        const questionText = event.edata?.eks?.target?.questionsDetails?.questionText;
+        const responseText = event.edata?.eks?.target?.questionsDetails?.responseText;
+
+        let nextOrder = (maxOrderMap.get(callId) || 0) + 1;
+
+        if (questionText && questionText.trim()) {
+          const base = msgValues.length;
+          msgPlaceholders.push(`($${base + 1}, 'user', $${base + 2}, $${base + 3})`);
+          msgValues.push(callId, questionText.trim(), nextOrder);
+          nextOrder++;
+        }
+
+        if (responseText && responseText.trim()) {
+          const base = msgValues.length;
+          msgPlaceholders.push(`($${base + 1}, 'assistant', $${base + 2}, $${base + 3})`);
+          msgValues.push(callId, responseText.trim(), nextOrder);
+          nextOrder++;
+        }
+
+        maxOrderMap.set(callId, nextOrder - 1);
+      }
+
+      if (msgValues.length > 0) {
+        await client.query(`
+          INSERT INTO messages (call_id, role, content, message_order)
+          VALUES ${msgPlaceholders.join(', ')}
+          ON CONFLICT (call_id, message_order) DO NOTHING
+        `, msgValues);
+      }
+
+      // Step 5: Batch upsert voice_call_tracking (deduplicated by sid)
+      const trackAgg = new Map(); // sid -> {callId, turnCount, maxEts}
+      for (const event of chunk) {
+        const sid = event.sid;
+        const callId = callIdMap.get(sid);
+        const ets = event.ets;
+        if (!sid || !callId || !ets) continue;
+
+        if (!trackAgg.has(sid)) {
+          trackAgg.set(sid, { callId, turnCount: 0, maxEts: ets });
+        }
+        const agg = trackAgg.get(sid);
+        agg.turnCount++;
+        if (ets > agg.maxEts) agg.maxEts = ets;
+      }
+
+      const trackValues = [];
+      const trackPlaceholders = [];
+
+      for (const [sid, { callId, turnCount, maxEts }] of trackAgg) {
+        const idx = trackValues.length / 4;
+        trackPlaceholders.push(`($${idx * 4 + 1}, $${idx * 4 + 2}, $${idx * 4 + 3}, $${idx * 4 + 4})`);
+        trackValues.push(sid, callId, turnCount, maxEts);
+      }
+
+      if (trackValues.length > 0) {
+        await client.query(`
+          INSERT INTO voice_call_tracking (sid, call_id, turns_processed, last_ets)
+          VALUES ${trackPlaceholders.join(', ')}
+          ON CONFLICT (sid) DO UPDATE SET
+            turns_processed = voice_call_tracking.turns_processed + EXCLUDED.turns_processed,
+            last_ets = GREATEST(voice_call_tracking.last_ets, EXCLUDED.last_ets),
+            updated_at = NOW()
+        `, trackValues);
+      }
+
+      processed += chunk.length;
+    }
+
+    const duration = Date.now() - batchStart;
+    logger.info(`[${batchId}] Batch voice processing: ${processed} events in ${duration}ms`);
+  } catch (err) {
+    logger.error(`[${batchId}] Error in batch voice processing: ${err.message}`);
+    throw err;
+  }
+
+  return processed;
+}
+
 // Lock to prevent concurrent cron runs
 let isProcessingLogs = false;
 let currentBatchId = null;
@@ -2093,7 +2120,9 @@ app.post("/api/event-processors", async (req, res) => {
     const result = await loadEventProcessors.registerEventProcessor(
       eventType,
       tableName,
-      fieldMappings
+      fieldMappings,
+      fieldVerification,
+      pool
     );
 
     res.status(201).json({
@@ -2685,9 +2714,17 @@ async function startServer() {
       logger.info(`Telemetry log processor service started on port ${PORT}`);
     });
 
-    // Skip initial processing on startup — the cron job (every 3 min) will pick up logs
-    // This prevents overlap between startup processing and the first cron run
-    logger.info('Initial processing skipped on startup — cron will process logs on next scheduled run');
+    // Run initial processing on startup with proper lock to prevent cron overlap
+    logger.info(`Running initial telemetry log processing on startup (Fast Mode: ${FAST_MODE})...`);
+    isProcessingLogs = true;
+    currentBatchId = `startup_${Date.now()}`;
+    try {
+      const processFn = FAST_MODE ? processTelemetryLogsFast : processTelemetryLogs;
+      await processFn(currentBatchId);
+    } finally {
+      isProcessingLogs = false;
+      currentBatchId = null;
+    }
 
     // await refreshLeaderboardAggregation();
 
@@ -2714,6 +2751,7 @@ process.on("SIGTERM", () => {
 // Export for testing
 module.exports = {
   app,
+  pool,
   startServer,
   processTelemetryLogs,
   processTelemetryLogsFast,
@@ -2726,5 +2764,3 @@ module.exports = {
 if (require.main === module) {
   startServer();
 }
-
-module.exports = { app, pool };

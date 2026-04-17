@@ -1667,7 +1667,7 @@ async function processTelemetryLogsFast(batchId = `fast_${Date.now()}`) {
       const lastSeenUids = Array.from(userLastSeenMap.keys());
       if (lastSeenUids.length > 0) {
         await client.query(
-          `UPDATE users SET last_seen_at = NOW() WHERE uid = ANY($1)`,
+          `UPDATE users SET last_seen_at = NOW() WHERE uid = ANY($1::text[])`,
           [lastSeenUids]
         );
       }
@@ -1675,7 +1675,7 @@ async function processTelemetryLogsFast(batchId = `fast_${Date.now()}`) {
       // Batch update sync_status for all processed logs in this micro-batch
       if (processedIds.length > 0) {
         await client.query(
-          `UPDATE winston_logs SET sync_status = 1 WHERE id = ANY($1)`,
+          `UPDATE winston_logs SET sync_status = 1 WHERE id = ANY($1::integer[])`,
           [processedIds]
         );
       }

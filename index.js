@@ -1735,7 +1735,7 @@ async function processTelemetryLogsFast(batchId = `fast_${Date.now()}`) {
       // Batch update sync_status for all processed logs in this micro-batch
       if (processedIds.length > 0) {
         await client.query(
-          `UPDATE winston_logs SET sync_status = 1 WHERE id = ANY($1::integer[])`,
+          `UPDATE winston_logs SET sync_status = 1 WHERE id = ANY($1::uuid[])`,
           [processedIds]
         );
       }

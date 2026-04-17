@@ -2586,35 +2586,63 @@ async function refreshMaterializedViews() {
           CREATE INDEX IF NOT EXISTS idx_mv_call_message_counts_user_id ON mv_call_message_counts(user_id);
         `
       },
-      // SKIPPED: sessions table does not exist in current schema
-      // {
-      //   name: 'mv_active_users',
-      //   query: `
-      //     CREATE MATERIALIZED VIEW IF NOT EXISTS mv_active_users AS
-      //     SELECT
-      //       DATE(TO_TIMESTAMP(session_start_at / 1000)) AS activity_date,
-      //       COUNT(DISTINCT user_id) AS active_users
-      //     FROM sessions
-      //     WHERE session_start_at IS NOT NULL
-      //     GROUP BY DATE(TO_TIMESTAMP(session_start_at / 1000));
-      //     CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_active_users_date ON mv_active_users(activity_date);
-      //   `
-      // },
-      // {
-      //   name: 'mv_session_duration',
-      //   query: `
-      //     CREATE MATERIALIZED VIEW IF NOT EXISTS mv_session_duration AS
-      //     SELECT
-      //       COUNT(*) AS total_sessions,
-      //       AVG(duration_seconds) AS avg_duration,
-      //       MIN(duration_seconds) AS min_duration,
-      //       MAX(duration_seconds) AS max_duration,
-      //       PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY duration_seconds) AS p50_duration,
-      //       PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_seconds) AS p95_duration
-      //     FROM sessions
-      //     WHERE duration_seconds IS NOT NULL AND duration_seconds > 0;
-      //   `
-      // }
+      // Active users per day: computed from questions + errordetails (no sessions table dependency)
+      // NOTE: Old mv_active_users was based on sessions table (from migration).
+      // This DO block drops it only if it still has the old definition, then recreates.
+      {
+        name: 'mv_active_users',
+        query: `
+          DO $$
+          BEGIN
+            IF EXISTS (
+              SELECT 1 FROM pg_matviews WHERE matviewname = 'mv_active_users'
+              AND definition LIKE '%sessions%'
+            ) THEN
+              DROP MATERIALIZED VIEW mv_active_users;
+            END IF;
+          END $$;
+          CREATE MATERIALIZED VIEW IF NOT EXISTS mv_active_users AS
+          SELECT
+            TO_TIMESTAMP(ets / 1000)::date AS activity_date,
+            COUNT(DISTINCT uid) AS active_users
+          FROM (
+            SELECT uid, ets FROM questions WHERE uid IS NOT NULL
+            UNION ALL
+            SELECT uid, ets FROM errordetails WHERE uid IS NOT NULL
+          ) combined
+          GROUP BY TO_TIMESTAMP(ets / 1000)::date;
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_active_users_date ON mv_active_users(activity_date);
+        `
+      },
+      // Daily session counts: pre-computes the expensive 3-table UNION + GROUP BY (sid, uid)
+      {
+        name: 'mv_daily_session_counts',
+        query: `
+          CREATE MATERIALIZED VIEW IF NOT EXISTS mv_daily_session_counts AS
+          SELECT
+            first_event_date AS stat_date,
+            COUNT(*) AS session_count
+          FROM (
+            SELECT
+              sid,
+              fingerprint_id AS uid,
+              TO_TIMESTAMP(MIN(ets) / 1000)::date AS first_event_date
+            FROM (
+              SELECT sid, fingerprint_id, ets FROM questions
+              WHERE sid IS NOT NULL AND answertext IS NOT NULL AND fingerprint_id IS NOT NULL
+              UNION ALL
+              SELECT sid, fingerprint_id, ets FROM feedback
+              WHERE sid IS NOT NULL AND fingerprint_id IS NOT NULL
+              UNION ALL
+              SELECT sid, fingerprint_id, ets FROM errordetails
+              WHERE sid IS NOT NULL AND fingerprint_id IS NOT NULL
+            ) all_events
+            GROUP BY sid, fingerprint_id
+          ) session_dates
+          GROUP BY first_event_date;
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_daily_session_counts_date ON mv_daily_session_counts(stat_date);
+        `
+      }
     ];
 
     // Ensure all MVs exist

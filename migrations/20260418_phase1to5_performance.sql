@@ -50,7 +50,7 @@ BEGIN
     EXECUTE $mv$
       CREATE MATERIALIZED VIEW mv_calls_daily_counts AS
       SELECT
-        DATE(timezone('Asia/Kolkata', c.start_datetime AT TIME ZONE 'UTC')) AS call_date,
+        DATE(c.start_datetime AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') AS call_date,
         COUNT(*) AS call_count
       FROM calls c
       WHERE c.start_datetime IS NOT NULL
@@ -67,7 +67,7 @@ END $$;
 DROP MATERIALIZED VIEW IF EXISTS mv_users_daily_firstseen_ist CASCADE;
 CREATE MATERIALIZED VIEW mv_users_daily_firstseen_ist AS
 SELECT
-  DATE(timezone('Asia/Kolkata', u.first_seen_at AT TIME ZONE 'UTC')) AS bucket_date,
+  DATE(u.first_seen_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') AS bucket_date,
   COUNT(DISTINCT u.fingerprint_id) AS new_users
 FROM users u
 WHERE u.fingerprint_id IS NOT NULL
@@ -84,14 +84,14 @@ CREATE UNIQUE INDEX idx_mv_users_daily_firstseen_ist_date ON mv_users_daily_firs
 DROP MATERIALIZED VIEW IF EXISTS mv_users_daily_returning_ist CASCADE;
 CREATE MATERIALIZED VIEW mv_users_daily_returning_ist AS
 SELECT
-  DATE(timezone('Asia/Kolkata', to_timestamp((q.ets)::double precision / 1000.0))) AS bucket_date,
+  DATE(TO_TIMESTAMP(q.ets / 1000) AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') AS bucket_date,
   COUNT(DISTINCT q.fingerprint_id) AS returning_users
 FROM questions q
 JOIN users u ON q.fingerprint_id = u.fingerprint_id
 WHERE q.fingerprint_id IS NOT NULL
   AND q.ets IS NOT NULL
-  AND DATE(timezone('Asia/Kolkata', to_timestamp((q.ets)::double precision / 1000.0)))
-      <> DATE(timezone('Asia/Kolkata', u.first_seen_at AT TIME ZONE 'UTC'))
+  AND DATE(TO_TIMESTAMP(q.ets / 1000) AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')
+      <> DATE(u.first_seen_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')
 GROUP BY 1;
 
 CREATE UNIQUE INDEX idx_mv_users_daily_returning_ist_date ON mv_users_daily_returning_ist(bucket_date);
@@ -111,7 +111,7 @@ BEGIN
     EXECUTE $mv$
       CREATE MATERIALIZED VIEW mv_feedback_daily AS
       SELECT
-        DATE(timezone('Asia/Kolkata', to_timestamp((f.ets)::double precision / 1000.0))) AS feedback_date,
+        DATE(TO_TIMESTAMP(f.ets / 1000) AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') AS feedback_date,
         COALESCE(f.channel, 'unknown') AS channel,
         COALESCE(f.feedback_source, 'chat') AS feedback_source,
         COUNT(*) AS total_feedback,
@@ -177,7 +177,7 @@ BEGIN
       SELECT
         sc.sid, sc.uid, sc.first_ets, sc.last_ets, sc.event_count,
         COALESCE(qc.question_count, 0) AS question_count,
-        DATE(timezone('Asia/Kolkata', to_timestamp((sc.first_ets)::double precision / 1000.0))) AS session_date_ist
+        DATE(TO_TIMESTAMP(sc.first_ets / 1000) AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') AS session_date_ist
       FROM session_counts sc
       LEFT JOIN question_counts qc ON qc.sid = sc.sid AND qc.uid = sc.uid
     $mv$;
@@ -201,7 +201,7 @@ WITH combined AS (
   SELECT uid, ets FROM errordetails WHERE uid IS NOT NULL AND ets IS NOT NULL
 )
 SELECT
-  DATE_TRUNC('hour', timezone('Asia/Kolkata', to_timestamp((c.ets)::double precision / 1000.0))) AS hour_bucket_ist,
+  DATE_TRUNC('hour', TO_TIMESTAMP(c.ets / 1000) AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') AS hour_bucket_ist,
   COUNT(DISTINCT c.uid) AS active_users
 FROM combined c
 WHERE c.ets >= (EXTRACT(EPOCH FROM (NOW() - INTERVAL '48 hours')) * 1000)
@@ -223,7 +223,7 @@ BEGIN
     EXECUTE $mv$
       CREATE MATERIALIZED VIEW mv_errors_daily AS
       SELECT
-        DATE(timezone('Asia/Kolkata', e.created_at AT TIME ZONE 'UTC')) AS error_date,
+        DATE(e.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') AS error_date,
         COALESCE(e.channel, 'unknown') AS channel,
         COUNT(*) AS error_count,
         COUNT(DISTINCT e.uid) AS unique_users,
@@ -249,7 +249,7 @@ BEGIN
     EXECUTE $mv$
       CREATE MATERIALIZED VIEW mv_asr_daily AS
       SELECT
-        DATE(timezone('Asia/Kolkata', to_timestamp((a.ets)::double precision / 1000.0))) AS stat_date,
+        DATE(TO_TIMESTAMP(a.ets / 1000) AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') AS stat_date,
         COUNT(*) AS total_calls,
         COUNT(*) FILTER (WHERE a.success IS TRUE) AS success_count,
         AVG(a.latencyms) AS avg_latency,
@@ -273,7 +273,7 @@ BEGIN
     EXECUTE $mv$
       CREATE MATERIALIZED VIEW mv_tts_daily AS
       SELECT
-        DATE(timezone('Asia/Kolkata', to_timestamp((t.ets)::double precision / 1000.0))) AS stat_date,
+        DATE(TO_TIMESTAMP(t.ets / 1000) AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') AS stat_date,
         COUNT(*) AS total_calls,
         COUNT(*) FILTER (WHERE t.success IS TRUE) AS success_count,
         AVG(t.latencyms) AS avg_latency,

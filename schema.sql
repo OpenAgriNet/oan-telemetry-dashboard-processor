@@ -150,7 +150,7 @@ ORDER BY c.start_datetime DESC, m.message_order ASC;
 -- 1. Daily call analytics: volumes, durations, channel breakdown
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_daily_call_stats AS
 SELECT
-  DATE(timezone('Asia/Kolkata', c.start_datetime AT TIME ZONE 'UTC')) AS call_date,
+  DATE(c.start_datetime) AS call_date,
   COALESCE(c.channel_direction, 'unknown') AS channel,
   COUNT(*) AS total_calls,
   COUNT(DISTINCT c.user_id) AS unique_users,
@@ -161,14 +161,14 @@ SELECT
   COUNT(CASE WHEN c.end_reason IS NOT NULL AND c.end_reason != 'completed' THEN 1 END) AS failed_calls
 FROM calls c
 WHERE c.start_datetime IS NOT NULL AND c.end_datetime IS NOT NULL
-GROUP BY DATE(timezone('Asia/Kolkata', c.start_datetime AT TIME ZONE 'UTC')), COALESCE(c.channel_direction, 'unknown');
+GROUP BY DATE(c.start_datetime), COALESCE(c.channel_direction, 'unknown');
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_daily_call_stats_date_channel ON mv_daily_call_stats(call_date, channel);
 
 -- 2. Daily user engagement metrics
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_user_engagement_daily AS
 SELECT
-  DATE(timezone('Asia/Kolkata', to_timestamp((s.session_start_at)::double precision / 1000.0))) AS activity_date,
+  DATE(TO_TIMESTAMP(s.session_start_at / 1000)) AS activity_date,
   COUNT(DISTINCT s.user_id) AS daily_active_users,
   COUNT(DISTINCT s.user_id) AS daily_devices,
   COUNT(*) AS total_sessions,
@@ -177,14 +177,14 @@ SELECT
   COUNT(DISTINCT CASE WHEN s.channel = 'chat' THEN s.user_id END) AS chat_users
 FROM sessions s
 WHERE s.session_start_at IS NOT NULL
-GROUP BY DATE(timezone('Asia/Kolkata', to_timestamp((s.session_start_at)::double precision / 1000.0)));
+GROUP BY DATE(TO_TIMESTAMP(s.session_start_at / 1000));
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_user_engagement_daily_date ON mv_user_engagement_daily(activity_date);
 
 -- 3. Question/answer rates and feedback aggregation
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_question_answer_rates AS
 SELECT
-  DATE(timezone('Asia/Kolkata', to_timestamp((q.ets)::double precision / 1000.0))) AS question_date,
+  DATE(TO_TIMESTAMP(q.ets / 1000)) AS question_date,
   COALESCE(q.channel, 'unknown') AS channel,
   COUNT(*) AS total_questions,
   COUNT(DISTINCT q.uid) AS unique_users,
@@ -198,17 +198,14 @@ SELECT
   COUNT(CASE WHEN f.feedbacktype = 'dislike' THEN 1 END) AS dislikes
 FROM questions q
 LEFT JOIN feedback f ON q.sid = f.sid AND q.ets = f.ets
-WHERE q.answertext IS NOT NULL
-  AND q.fingerprint_id IS NOT NULL
-  AND q.ets IS NOT NULL
-GROUP BY DATE(timezone('Asia/Kolkata', to_timestamp((q.ets)::double precision / 1000.0))), COALESCE(q.channel, 'unknown');
+GROUP BY DATE(TO_TIMESTAMP(q.ets / 1000)), COALESCE(q.channel, 'unknown');
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_question_answer_rates_date_channel ON mv_question_answer_rates(question_date, channel);
 
 -- 4. Channel performance comparison (voice vs chat)
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_channel_performance AS
 SELECT
-  DATE(timezone('Asia/Kolkata', to_timestamp((s.session_start_at)::double precision / 1000.0))) AS performance_date,
+  DATE(TO_TIMESTAMP(s.session_start_at / 1000)) AS performance_date,
   COALESCE(s.channel, 'unknown') AS channel,
   COUNT(DISTINCT s.user_id) AS users,
   COUNT(*) AS sessions,
@@ -216,12 +213,10 @@ SELECT
   SUM(CASE WHEN m.id IS NOT NULL THEN 1 ELSE 0 END) AS messages,
   AVG(CASE WHEN c.duration_in_seconds IS NOT NULL THEN c.duration_in_seconds END) AS avg_call_duration
 FROM sessions s
-LEFT JOIN calls c ON s.user_id = c.user_id
-  AND DATE(timezone('Asia/Kolkata', to_timestamp((s.session_start_at)::double precision / 1000.0)))
-      = DATE(timezone('Asia/Kolkata', c.start_datetime AT TIME ZONE 'UTC'))
+LEFT JOIN calls c ON s.user_id = c.user_id AND DATE(TO_TIMESTAMP(s.session_start_at / 1000)) = DATE(c.start_datetime)
 LEFT JOIN messages m ON m.call_id = c.id
 WHERE s.session_start_at IS NOT NULL
-GROUP BY DATE(timezone('Asia/Kolkata', to_timestamp((s.session_start_at)::double precision / 1000.0))), COALESCE(s.channel, 'unknown');
+GROUP BY DATE(TO_TIMESTAMP(s.session_start_at / 1000)), COALESCE(s.channel, 'unknown');
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_channel_performance_date_channel ON mv_channel_performance(performance_date, channel);
 
@@ -248,11 +243,11 @@ CREATE INDEX IF NOT EXISTS idx_mv_call_message_counts_user_id ON mv_call_message
 -- 6. Active users by date
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_active_users AS
 SELECT
-  DATE(timezone('Asia/Kolkata', to_timestamp((session_start_at)::double precision / 1000.0))) AS activity_date,
+  DATE(TO_TIMESTAMP(session_start_at / 1000)) AS activity_date,
   COUNT(DISTINCT user_id) AS active_users
 FROM sessions
 WHERE session_start_at IS NOT NULL
-GROUP BY DATE(timezone('Asia/Kolkata', to_timestamp((session_start_at)::double precision / 1000.0)));
+GROUP BY DATE(TO_TIMESTAMP(session_start_at / 1000));
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_active_users_date ON mv_active_users(activity_date);
 

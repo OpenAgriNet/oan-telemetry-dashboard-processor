@@ -38,9 +38,9 @@ const pool = new Pool({
   max: parseInt(process.env.DB_POOL_MAX || "20", 10),
   idleTimeoutMillis: parseInt(process.env.DB_IDLE_TIMEOUT_MS || "30000", 10),
   connectionTimeoutMillis: parseInt(process.env.DB_CONN_TIMEOUT_MS || "5000", 10),
-  ssl: {
-    rejectUnauthorized: false
-  }
+  // ssl: {
+  //   rejectUnauthorized: false
+  // }
 });
 
 // async function ensureVillagesSeeded() {
@@ -503,6 +503,23 @@ async function ensureTablesExist() {
       created_at TIMESTAMP DEFAULT NOW()
     )
       `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.app_download_daily_metrics(
+        date DATE NOT NULL,
+        platform VARCHAR(20) NOT NULL,
+        installs INTEGER NOT NULL,
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (date, platform),
+        CONSTRAINT app_download_daily_metrics_platform_check
+          CHECK (platform IN ('ios', 'android'))
+      )
+    `);
+
+    // await client.query(`
+    //   CREATE INDEX IF NOT EXISTS idx_app_download_daily_metrics_updated_at
+    //   ON public.app_download_daily_metrics(updated_at)
+    // `);
 
     // Add missing columns to network_api_table if they don't exist
     await client.query(`

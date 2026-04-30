@@ -503,14 +503,14 @@ async function ensureTablesExist() {
       created_at TIMESTAMP DEFAULT NOW()
     )
       `);
-
+      
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.app_download_daily_metrics(
         date DATE NOT NULL,
         platform VARCHAR(20) NOT NULL,
+        version VARCHAR(100) NOT NULL,
         installs INTEGER NOT NULL,
         updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-        PRIMARY KEY (date, platform),
         CONSTRAINT app_download_daily_metrics_platform_check
           CHECK (platform IN ('ios', 'android'))
       )

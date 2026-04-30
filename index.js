@@ -2517,7 +2517,7 @@ async function refreshMaterializedViews() {
         query: `
           CREATE MATERIALIZED VIEW IF NOT EXISTS mv_daily_call_stats AS
           SELECT
-            DATE(c.start_datetime) AS call_date,
+            DATE(timezone('Asia/Kolkata', c.start_datetime AT TIME ZONE 'UTC')) AS call_date,
             COALESCE(c.channel_direction, 'unknown') AS channel,
             COUNT(*) AS total_calls,
             COUNT(DISTINCT c.user_id) AS unique_users,
@@ -2528,7 +2528,7 @@ async function refreshMaterializedViews() {
             COUNT(CASE WHEN c.end_reason IS NOT NULL AND c.end_reason != 'completed' THEN 1 END) AS failed_calls
           FROM calls c
           WHERE c.start_datetime IS NOT NULL AND c.end_datetime IS NOT NULL
-          GROUP BY DATE(c.start_datetime), COALESCE(c.channel_direction, 'unknown');
+          GROUP BY DATE(timezone('Asia/Kolkata', c.start_datetime AT TIME ZONE 'UTC')), COALESCE(c.channel_direction, 'unknown');
           CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_daily_call_stats_date_channel ON mv_daily_call_stats(call_date, channel);
         `
       },
@@ -2554,9 +2554,13 @@ async function refreshMaterializedViews() {
       {
         name: 'mv_question_answer_rates',
         query: `
+          -- Note: the one-time DROP+recreate for IST compliance and metric-definition
+          -- alignment (answertext + fingerprint_id filter) is handled by migration
+          -- 20260429_ist_compliance_mv_rebuild.sql.  Here we only create if absent
+          -- (i.e. first-ever deployment without that migration having run yet).
           CREATE MATERIALIZED VIEW IF NOT EXISTS mv_question_answer_rates AS
           SELECT
-            DATE(TO_TIMESTAMP(q.ets / 1000)) AS question_date,
+            DATE(timezone('Asia/Kolkata', to_timestamp((q.ets)::double precision / 1000.0))) AS question_date,
             COALESCE(q.channel, 'unknown') AS channel,
             COUNT(*) AS total_questions,
             COUNT(DISTINCT q.uid) AS unique_users,
@@ -2570,7 +2574,10 @@ async function refreshMaterializedViews() {
             COUNT(CASE WHEN f.feedbacktype = 'dislike' THEN 1 END) AS dislikes
           FROM questions q
           LEFT JOIN feedback f ON q.sid = f.sid AND q.ets = f.ets
-          GROUP BY DATE(TO_TIMESTAMP(q.ets / 1000)), COALESCE(q.channel, 'unknown');
+          WHERE q.answertext IS NOT NULL
+            AND q.fingerprint_id IS NOT NULL
+            AND q.ets IS NOT NULL
+          GROUP BY DATE(timezone('Asia/Kolkata', to_timestamp((q.ets)::double precision / 1000.0))), COALESCE(q.channel, 'unknown');
           CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_question_answer_rates_date_channel ON mv_question_answer_rates(question_date, channel);
         `
       },
@@ -2619,30 +2626,24 @@ async function refreshMaterializedViews() {
         `
       },
       // Active users per day: computed from questions + errordetails (no sessions table dependency)
-      // NOTE: Old mv_active_users was based on sessions table (from migration).
-      // This DO block drops it only if it still has the old definition, then recreates.
+      // NOTE: Old mv_active_users was based on sessions table.
+      // Migration 20260429_ist_compliance_mv_rebuild.sql drops and recreates it with the correct definition.
       {
         name: 'mv_active_users',
         query: `
-          DO $$
-          BEGIN
-            IF EXISTS (
-              SELECT 1 FROM pg_matviews WHERE matviewname = 'mv_active_users'
-              AND definition LIKE '%sessions%'
-            ) THEN
-              DROP MATERIALIZED VIEW mv_active_users;
-            END IF;
-          END $$;
+          -- Note: the one-time DROP+recreate (was based on sessions table; now
+          -- uses questions + errordetails with IST bucketing) is handled by
+          -- migration 20260429_ist_compliance_mv_rebuild.sql.
           CREATE MATERIALIZED VIEW IF NOT EXISTS mv_active_users AS
           SELECT
-            TO_TIMESTAMP(ets / 1000)::date AS activity_date,
+            DATE(timezone('Asia/Kolkata', to_timestamp((ets)::double precision / 1000.0))) AS activity_date,
             COUNT(DISTINCT uid) AS active_users
           FROM (
             SELECT uid, ets FROM questions WHERE uid IS NOT NULL
             UNION ALL
             SELECT uid, ets FROM errordetails WHERE uid IS NOT NULL
           ) combined
-          GROUP BY TO_TIMESTAMP(ets / 1000)::date;
+          GROUP BY DATE(timezone('Asia/Kolkata', to_timestamp((ets)::double precision / 1000.0)));
           CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_active_users_date ON mv_active_users(activity_date);
         `
       },
@@ -2658,7 +2659,7 @@ async function refreshMaterializedViews() {
             SELECT
               sid,
               fingerprint_id AS uid,
-              TO_TIMESTAMP(MIN(ets) / 1000)::date AS first_event_date
+              DATE(timezone('Asia/Kolkata', to_timestamp((MIN(ets))::double precision / 1000.0))) AS first_event_date
             FROM (
               SELECT sid, fingerprint_id, ets FROM questions
               WHERE sid IS NOT NULL AND answertext IS NOT NULL AND fingerprint_id IS NOT NULL
@@ -2686,7 +2687,7 @@ async function refreshMaterializedViews() {
         query: `
           CREATE MATERIALIZED VIEW IF NOT EXISTS mv_calls_daily_counts AS
           SELECT
-            DATE(c.start_datetime AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') AS call_date,
+            DATE(timezone('Asia/Kolkata', c.start_datetime AT TIME ZONE 'UTC')) AS call_date,
             COUNT(*) AS call_count
           FROM calls c
           WHERE c.start_datetime IS NOT NULL
@@ -2699,7 +2700,7 @@ async function refreshMaterializedViews() {
         query: `
           CREATE MATERIALIZED VIEW IF NOT EXISTS mv_users_daily_firstseen_ist AS
           SELECT
-            DATE(u.first_seen_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') AS bucket_date,
+            DATE(timezone('Asia/Kolkata', u.first_seen_at AT TIME ZONE 'UTC')) AS bucket_date,
             COUNT(DISTINCT u.fingerprint_id) AS new_users
           FROM users u
           WHERE u.fingerprint_id IS NOT NULL
@@ -2713,14 +2714,14 @@ async function refreshMaterializedViews() {
         query: `
           CREATE MATERIALIZED VIEW IF NOT EXISTS mv_users_daily_returning_ist AS
           SELECT
-            DATE(TO_TIMESTAMP(q.ets / 1000) AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') AS bucket_date,
+            DATE(timezone('Asia/Kolkata', to_timestamp((q.ets)::double precision / 1000.0))) AS bucket_date,
             COUNT(DISTINCT q.fingerprint_id) AS returning_users
           FROM questions q
           JOIN users u ON q.fingerprint_id = u.fingerprint_id
           WHERE q.fingerprint_id IS NOT NULL
             AND q.ets IS NOT NULL
-            AND DATE(TO_TIMESTAMP(q.ets / 1000) AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')
-                <> DATE(u.first_seen_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')
+            AND DATE(timezone('Asia/Kolkata', to_timestamp((q.ets)::double precision / 1000.0)))
+                <> DATE(timezone('Asia/Kolkata', u.first_seen_at AT TIME ZONE 'UTC'))
           GROUP BY 1;
           CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_users_daily_returning_ist_date ON mv_users_daily_returning_ist(bucket_date);
         `
@@ -2730,7 +2731,7 @@ async function refreshMaterializedViews() {
         query: `
           CREATE MATERIALIZED VIEW IF NOT EXISTS mv_feedback_daily AS
           SELECT
-            DATE(TO_TIMESTAMP(f.ets / 1000) AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') AS feedback_date,
+            DATE(timezone('Asia/Kolkata', to_timestamp((f.ets)::double precision / 1000.0))) AS feedback_date,
             COALESCE(f.channel, 'unknown') AS channel,
             COALESCE(f.feedback_source, 'chat') AS feedback_source,
             COUNT(*) AS total_feedback,
@@ -2779,7 +2780,7 @@ async function refreshMaterializedViews() {
           SELECT
             sc.sid, sc.uid, sc.first_ets, sc.last_ets, sc.event_count,
             COALESCE(qc.question_count, 0) AS question_count,
-            DATE(TO_TIMESTAMP(sc.first_ets / 1000) AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') AS session_date_ist
+            DATE(timezone('Asia/Kolkata', to_timestamp((sc.first_ets)::double precision / 1000.0))) AS session_date_ist
           FROM session_counts sc
           LEFT JOIN question_counts qc ON qc.sid = sc.sid AND qc.uid = sc.uid;
           CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_sessions_daily_sid_uid ON mv_sessions_daily(sid, uid);
@@ -2798,7 +2799,7 @@ async function refreshMaterializedViews() {
             SELECT uid, ets FROM errordetails WHERE uid IS NOT NULL AND ets IS NOT NULL
           )
           SELECT
-            DATE_TRUNC('hour', TO_TIMESTAMP(c.ets / 1000) AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') AS hour_bucket_ist,
+            DATE_TRUNC('hour', timezone('Asia/Kolkata', to_timestamp((c.ets)::double precision / 1000.0))) AS hour_bucket_ist,
             COUNT(DISTINCT c.uid) AS active_users
           FROM combined c
           WHERE c.ets >= (EXTRACT(EPOCH FROM (NOW() - INTERVAL '48 hours')) * 1000)
@@ -2811,7 +2812,7 @@ async function refreshMaterializedViews() {
         query: `
           CREATE MATERIALIZED VIEW IF NOT EXISTS mv_errors_daily AS
           SELECT
-            DATE(e.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') AS error_date,
+            DATE(timezone('Asia/Kolkata', e.created_at AT TIME ZONE 'UTC')) AS error_date,
             COALESCE(e.channel, 'unknown') AS channel,
             COUNT(*) AS error_count,
             COUNT(DISTINCT e.uid) AS unique_users,
@@ -2829,7 +2830,7 @@ async function refreshMaterializedViews() {
         query: `
           CREATE MATERIALIZED VIEW IF NOT EXISTS mv_asr_daily AS
           SELECT
-            DATE(TO_TIMESTAMP(a.ets / 1000) AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') AS stat_date,
+            DATE(timezone('Asia/Kolkata', to_timestamp((a.ets)::double precision / 1000.0))) AS stat_date,
             COUNT(*) AS total_calls,
             COUNT(*) FILTER (WHERE a.success IS TRUE) AS success_count,
             AVG(a.latencyms) AS avg_latency,
@@ -2845,7 +2846,7 @@ async function refreshMaterializedViews() {
         query: `
           CREATE MATERIALIZED VIEW IF NOT EXISTS mv_tts_daily AS
           SELECT
-            DATE(TO_TIMESTAMP(t.ets / 1000) AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') AS stat_date,
+            DATE(timezone('Asia/Kolkata', to_timestamp((t.ets)::double precision / 1000.0))) AS stat_date,
             COUNT(*) AS total_calls,
             COUNT(*) FILTER (WHERE t.success IS TRUE) AS success_count,
             AVG(t.latencyms) AS avg_latency,

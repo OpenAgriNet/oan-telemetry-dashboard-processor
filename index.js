@@ -511,6 +511,7 @@ async function ensureTablesExist() {
         version VARCHAR(100) NOT NULL,
         installs INTEGER NOT NULL,
         updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (date, platform, version),
         CONSTRAINT app_download_daily_metrics_platform_check
           CHECK (platform IN ('ios', 'android'))
       )

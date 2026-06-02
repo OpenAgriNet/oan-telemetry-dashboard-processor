@@ -225,7 +225,7 @@ function registerProcessor(id,eventType, tableName, fieldMappings, fieldVerifica
         }
         
         // Ensure JSONB fields are sent as proper JSON values in SQL (pg driver handles JS objects)
-        const isJsonField = ['registered_location', 'device_location', 'agristack_location', 'groupdetails', 'answertext'].includes(field.toLowerCase());
+        const isJsonField = ['registered_location', 'device_location', 'agristack_location', 'groupdetails', 'answertext', 'metadata', 'response'].includes(field.toLowerCase());
         values.push(isJsonField ? (value === null ? null : value) : ((typeof value === 'object' && value !== null) ? JSON.stringify(value) : value));
         placeholders.push(`$${paramIndex++}`);
       });

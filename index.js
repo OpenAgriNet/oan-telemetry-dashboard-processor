@@ -550,6 +550,34 @@ async function ensureTablesExist() {
       END $$;
     `);
 
+    // Create generic UI interaction events table for OE_INTERACT telemetry
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.ui_interaction_events(
+        id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+        source_log_id UUID,
+        source_event_index INTEGER,
+        eid VARCHAR,
+        uid VARCHAR,
+        fingerprint_id VARCHAR,
+        sid VARCHAR,
+        channel VARCHAR,
+        ets BIGINT,
+        event_name VARCHAR(100) NOT NULL,
+        category VARCHAR(100),
+        event_time TIMESTAMPTZ,
+        metadata JSONB DEFAULT '{}'::jsonb,
+        notification_id VARCHAR,
+        action VARCHAR,
+        reason VARCHAR,
+        feedback TEXT,
+        status_code INTEGER,
+        success BOOLEAN,
+        response JSONB,
+        response_count INTEGER,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
     // Create event_processors table if not exists
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.event_processors(
@@ -937,6 +965,65 @@ event_type = 'OE_ITEM_RESPONSE',
 field_verification = 'edata.eks.target.networkApiDetails',
   updated_at = NOW()
       WHERE table_name = 'network_api_table';
+`);
+
+    // Insert UI interaction telemetry event processor
+    await client.query(`
+      INSERT INTO public.event_processors(event_type, table_name, field_mappings, field_verification)
+VALUES
+  ('OE_INTERACT', 'ui_interaction_events', '{
+    "source_log_id": "_source_log_id",
+    "source_event_index": "_source_event_index",
+    "eid": "eid",
+    "uid": "uid",
+    "fingerprint_id": "did",
+    "sid": "edata.eks.metadata.sid",
+    "channel": "channel",
+    "ets": "ets",
+    "event_name": "edata.eks.eventName",
+    "category": "edata.eks.category",
+    "event_time": "edata.eks.clientTime",
+    "metadata": "edata.eks.metadata",
+    "notification_id": "edata.eks.metadata.notification_id",
+    "action": "edata.eks.metadata.action",
+    "reason": "edata.eks.metadata.reason",
+    "feedback": "edata.eks.metadata.feedback",
+    "status_code": "edata.eks.metadata.status_code",
+    "success": "edata.eks.metadata.success",
+    "response": "edata.eks.metadata.response",
+    "response_count": "edata.eks.metadata.response.count"
+        }','edata.eks.eventName')
+      ON CONFLICT DO NOTHING;
+`);
+    await client.query(`
+      UPDATE public.event_processors
+SET
+event_type = 'OE_INTERACT',
+  field_mappings = '{
+    "source_log_id": "_source_log_id",
+    "source_event_index": "_source_event_index",
+    "eid": "eid",
+    "uid": "uid",
+    "fingerprint_id": "did",
+    "sid": "edata.eks.metadata.sid",
+    "channel": "channel",
+    "ets": "ets",
+    "event_name": "edata.eks.eventName",
+    "category": "edata.eks.category",
+    "event_time": "edata.eks.clientTime",
+    "metadata": "edata.eks.metadata",
+    "notification_id": "edata.eks.metadata.notification_id",
+    "action": "edata.eks.metadata.action",
+    "reason": "edata.eks.metadata.reason",
+    "feedback": "edata.eks.metadata.feedback",
+    "status_code": "edata.eks.metadata.status_code",
+    "success": "edata.eks.metadata.success",
+    "response": "edata.eks.metadata.response",
+    "response_count": "edata.eks.metadata.response.count"
+        }',
+field_verification = 'edata.eks.eventName',
+  updated_at = NOW()
+      WHERE table_name = 'ui_interaction_events';
 `);
 
 
@@ -1392,7 +1479,10 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()} `) {
         const log = chunk[logIndex];
         const events = parseTelemetryMessage(log.message, batchId, logIndex + 1);
 
-        for (const event of events) {
+        for (let eventIndex = 0; eventIndex < events.length; eventIndex++) {
+          const event = events[eventIndex];
+          event._source_log_id = log.id;
+          event._source_event_index = eventIndex;
           const eventType = event.eid;
           const eventUid = event.uid || 'unknown';
           const eventMid = event.mid || 'unknown';
@@ -1562,7 +1652,10 @@ async function processTelemetryLogsFast(batchId = `fast_${Date.now()}`) {
       for (const log of chunk) {
         const events = parseTelemetryMessage(log.message, batchId, 0);
 
-        for (const event of events) {
+        for (let eventIndex = 0; eventIndex < events.length; eventIndex++) {
+          const event = events[eventIndex];
+          event._source_log_id = log.id;
+          event._source_event_index = eventIndex;
           const eventType = event.eid;
 
           let eventProcessed = false;

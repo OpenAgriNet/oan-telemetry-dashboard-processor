@@ -20,6 +20,7 @@ const {
   loadEventProcessors,
   getNestedValue,
 } = require("./eventProcessors");
+const { pii } = require("./middleware/pii");
 const { forEach } = require("lodash");
 
 // Load environment variables from .env file
@@ -28,6 +29,7 @@ dotenv.config();
 // Create Express application
 const app = express();
 app.use(express.json());
+app.use(pii.express());
 
 const pool = new Pool({
   user: process.env.DB_USER,
@@ -1810,7 +1812,7 @@ async function processVoiceResponse(client, event) {
         INSERT INTO messages (call_id, role, content, message_order)
         VALUES ($1, 'user', $2, $3)
         ON CONFLICT (call_id, message_order) DO NOTHING
-      `, [callId, questionText.trim(), nextOrder]);
+      `, [callId, pii.maskMessage(questionText.trim()), nextOrder]);
       nextOrder++;
     }
 
@@ -1819,7 +1821,7 @@ async function processVoiceResponse(client, event) {
         INSERT INTO messages (call_id, role, content, message_order)
         VALUES ($1, 'assistant', $2, $3)
         ON CONFLICT (call_id, message_order) DO NOTHING
-      `, [callId, responseText.trim(), nextOrder]);
+      `, [callId, pii.maskMessage(responseText.trim()), nextOrder]);
     }
 
     // Step 5: Upsert voice_call_tracking
@@ -1969,14 +1971,14 @@ async function processVoiceResponseBatch(client, events, batchId) {
         if (questionText && questionText.trim()) {
           const base = msgValues.length;
           msgPlaceholders.push(`($${base + 1}, 'user', $${base + 2}, $${base + 3})`);
-          msgValues.push(callId, questionText.trim(), nextOrder);
+          msgValues.push(callId, pii.maskMessage(questionText.trim()), nextOrder);
           nextOrder++;
         }
 
         if (responseText && responseText.trim()) {
           const base = msgValues.length;
           msgPlaceholders.push(`($${base + 1}, 'assistant', $${base + 2}, $${base + 3})`);
-          msgValues.push(callId, responseText.trim(), nextOrder);
+          msgValues.push(callId, pii.maskMessage(responseText.trim()), nextOrder);
           nextOrder++;
         }
 
@@ -3126,6 +3128,7 @@ process.on("SIGTERM", () => {
 module.exports = {
   app,
   pool,
+  pii,
   startServer,
   processTelemetryLogs,
   processTelemetryLogsFast,

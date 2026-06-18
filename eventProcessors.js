@@ -6,6 +6,7 @@
 
 const logger = require('./logger');
 const _ = require('lodash');
+const { pii } = require('./middleware/pii');
 
 // Event processor registry
 let eventProcessors = [];
@@ -224,6 +225,8 @@ function registerProcessor(id,eventType, tableName, fieldMappings, fieldVerifica
           }
         }
         
+        value = pii.maskColumn(field.toLowerCase(), value);
+
         // Ensure JSONB fields are sent as proper JSON values in SQL (pg driver handles JS objects)
         const isJsonField = ['registered_location', 'device_location', 'agristack_location', 'groupdetails', 'answertext', 'metadata', 'response'].includes(field.toLowerCase());
         values.push(isJsonField ? (value === null ? null : value) : ((typeof value === 'object' && value !== null) ? JSON.stringify(value) : value));

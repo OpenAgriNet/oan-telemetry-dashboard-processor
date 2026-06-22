@@ -25,11 +25,13 @@ const TABLES = [
   {
     table: "messages",
     idColumn: "id",
+    pagination: "id",
     columns: [{ name: "content", mask: (v) => pii.maskMessage(v) }],
   },
   {
     table: "questions",
     idColumn: "id",
+    pagination: "created_at",
     columns: [
       { name: "questiontext" },
       { name: "answer" },
@@ -40,6 +42,7 @@ const TABLES = [
   {
     table: "feedback",
     idColumn: "id",
+    pagination: "created_at",
     columns: [
       { name: "feedbacktext" },
       { name: "questiontext" },
@@ -50,6 +53,7 @@ const TABLES = [
   {
     table: "errordetails",
     idColumn: "id",
+    pagination: "created_at",
     columns: [{ name: "errormessage" }],
   },
 ];
@@ -76,21 +80,38 @@ async function backfillTable(client, spec) {
   const cols = spec.columns.map((c) => c.name);
   const selectCols = ["id", ...cols].join(", ");
 
-  let lastId = 0;
+  let lastId = null;
+  let lastCreatedAt = null;
   let scanned = 0;
   let updated = 0;
 
   for (;;) {
-    const { rows } = await client.query(
-      `SELECT ${selectCols} FROM ${spec.table} WHERE ${spec.idColumn} > $1 ORDER BY ${spec.idColumn} ASC LIMIT $2`,
-      [lastId, BATCH_SIZE],
-    );
+    const query =
+      spec.pagination === "id"
+        ? {
+            text: `SELECT ${selectCols} FROM ${spec.table} WHERE ${spec.idColumn} > $1 ORDER BY ${spec.idColumn} ASC LIMIT $2`,
+            values: [lastId ?? 0, BATCH_SIZE],
+          }
+        : lastCreatedAt === null
+          ? {
+              text: `SELECT ${selectCols}, created_at FROM ${spec.table} ORDER BY created_at ASC, ${spec.idColumn} ASC LIMIT $1`,
+              values: [BATCH_SIZE],
+            }
+          : {
+              text: `SELECT ${selectCols}, created_at FROM ${spec.table} WHERE (created_at, ${spec.idColumn}) > ($1::timestamp, $2::uuid) ORDER BY created_at ASC, ${spec.idColumn} ASC LIMIT $3`,
+              values: [lastCreatedAt, lastId, BATCH_SIZE],
+            };
+
+    const { rows } = await client.query(query.text, query.values);
 
     if (rows.length === 0) break;
 
     for (const row of rows) {
       scanned += 1;
       lastId = row.id;
+      if (spec.pagination !== "id") {
+        lastCreatedAt = row.created_at;
+      }
 
       const sets = [];
       const params = [];

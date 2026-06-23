@@ -193,6 +193,7 @@ async function ensureTablesExist() {
         groupdetails TEXT,
         channel VARCHAR,
         ets BIGINT,
+        qid VARCHAR,
         questiontext TEXT,
         questionsource VARCHAR,
         answertext TEXT,
@@ -239,6 +240,9 @@ async function ensureTablesExist() {
     BEGIN 
         IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'questions' AND column_name = 'unique_id') THEN
           ALTER TABLE public.questions ADD COLUMN unique_id VARCHAR;
+        END IF;
+        IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'questions' AND column_name = 'qid') THEN
+          ALTER TABLE public.questions ADD COLUMN qid VARCHAR;
         END IF;
         IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'questions' AND column_name = 'mobile') THEN
           ALTER TABLE public.questions ADD COLUMN mobile VARCHAR;
@@ -621,6 +625,7 @@ async function ensureTablesExist() {
         "groupDetails": "edata.eks.target.questionsDetails.groupDetails",
         "channel": "channel",
         "ets": "ets",
+        "qid": "edata.eks.qid",
         "questionText": "edata.eks.target.questionsDetails.questionText",
         "questionSource": "edata.eks.target.questionsDetails.questionSource",
         "answerText": "edata.eks.target.questionsDetails.answerText",
@@ -648,6 +653,7 @@ async function ensureTablesExist() {
         "groupDetails": "edata.eks.target.questionsDetails.groupDetails",
           "channel": "channel",
             "ets": "ets",
+              "qid": "edata.eks.qid",
               "questionText": "edata.eks.target.questionsDetails.questionText",
                 "questionSource": "edata.eks.target.questionsDetails.questionSource",
                   "answerText": "edata.eks.target.questionsDetails.answerText",
@@ -1120,9 +1126,11 @@ BEGIN
 
     // questions table indexes
     await client.query(`CREATE INDEX IF NOT EXISTS idx_questions_created_at ON questions(created_at)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_questions_qid ON questions(qid) WHERE qid IS NOT NULL`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_questions_uid ON questions(uid)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_questions_sid ON questions(sid)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_questions_ets ON questions(ets)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_questions_sid_ets ON questions(sid, ets)`);
 
     // feedback table indexes
     await client.query(`CREATE INDEX IF NOT EXISTS idx_feedback_created_at ON feedback(created_at)`);

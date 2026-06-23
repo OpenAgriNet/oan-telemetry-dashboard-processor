@@ -70,7 +70,7 @@ const TABLES = [
     table: "errordetails",
     idColumn: "id",
     pagination: "created_at",
-    columns: [{ name: "errormessage" }],
+    columns: [{ name: "errortext" }],
   },
 ];
 

@@ -13,7 +13,9 @@
     "lint:fix": "eslint . --fix",
     "ingest": "node ingest_csv.js --file",
     "backfill:pii": "node scripts/backfill-pii-masking.js",
-    "backfill:pii:dry-run": "node scripts/backfill-pii-masking.js --dry-run"
+    "backfill:pii:dry-run": "node scripts/backfill-pii-masking.js --dry-run",
+    "backfill:pii:job": "node scripts/backfill-pii-masking-job.js",
+    "backfill:pii:job:dry-run": "node scripts/backfill-pii-masking-job.js --dry-run"
   },
   "dependencies": {
     "dotenv": "^16.3.1",

@@ -25,6 +25,11 @@ const {
   isAppleSyncConfigured,
   syncAppleDownloads,
 } = require("./appleDownloadsSync");
+const {
+  getGooglePlaySyncConfigFromEnv,
+  isGooglePlaySyncConfigured,
+  syncGooglePlayDownloads,
+} = require("./googlePlayDownloadsSync");
 const { forEach } = require("lodash");
 
 // Load environment variables from .env file
@@ -141,6 +146,10 @@ const MV_REFRESH_SCHEDULE = process.env.MV_REFRESH_SCHEDULE || "*/15 * * * *"; /
 const APPLE_SYNC_CONFIG = getAppleSyncConfigFromEnv();
 const APPLE_DOWNLOADS_SYNC_ENABLED = isAppleSyncConfigured(APPLE_SYNC_CONFIG);
 const APPLE_CRON_SCHEDULE = APPLE_SYNC_CONFIG.cronSchedule;
+const GOOGLE_PLAY_SYNC_CONFIG = getGooglePlaySyncConfigFromEnv();
+const GOOGLE_PLAY_DOWNLOADS_SYNC_ENABLED =
+  isGooglePlaySyncConfigured(GOOGLE_PLAY_SYNC_CONFIG);
+const GOOGLE_PLAY_CRON_SCHEDULE = GOOGLE_PLAY_SYNC_CONFIG.cronSchedule;
 
 // ===== FAST MODE CONFIG =====
 const FAST_MODE = (process.env.FAST_MODE || 'true').toLowerCase() === 'true'; // Enabled by default
@@ -2145,6 +2154,7 @@ async function processVoiceResponseBatch(client, events, batchId) {
 let isProcessingLogs = false;
 let currentBatchId = null;
 let isAppleDownloadsSyncRunning = false;
+let isGooglePlayDownloadsSyncRunning = false;
 
 async function runAppleDownloadsSync(source = "manual") {
   if (!APPLE_DOWNLOADS_SYNC_ENABLED) {
@@ -2189,6 +2199,49 @@ async function runAppleDownloadsSync(source = "manual") {
   }
 }
 
+async function runGooglePlayDownloadsSync(source = "manual") {
+  if (!GOOGLE_PLAY_DOWNLOADS_SYNC_ENABLED) {
+    return {
+      status: "skipped",
+      reason: "missing_configuration",
+    };
+  }
+
+  if (isGooglePlayDownloadsSyncRunning) {
+    logger.warn(
+      `[GOOGLE_PLAY_DOWNLOADS] Skipping ${source} run because a previous Google Play sync is still in progress`,
+    );
+    return {
+      status: "skipped",
+      reason: "already_running",
+    };
+  }
+
+  isGooglePlayDownloadsSyncRunning = true;
+  const startedAt = Date.now();
+
+  try {
+    logger.info(`[GOOGLE_PLAY_DOWNLOADS] Starting ${source} sync`);
+    const result = await syncGooglePlayDownloads({ pool, logger });
+    const durationMs = Date.now() - startedAt;
+    logger.info(
+      `[GOOGLE_PLAY_DOWNLOADS] ${source} sync finished with status=${result.status} in ${durationMs}ms`,
+    );
+    return {
+      ...result,
+      durationMs,
+    };
+  } catch (error) {
+    const durationMs = Date.now() - startedAt;
+    logger.error(
+      `[GOOGLE_PLAY_DOWNLOADS] ${source} sync failed after ${durationMs}ms: ${error.message}`,
+    );
+    throw error;
+  } finally {
+    isGooglePlayDownloadsSyncRunning = false;
+  }
+}
+
 // Schedule telemetry processing with configurable cron schedule
 cron.schedule(CRON_SCHEDULE, async () => {
   // Check if already processing
@@ -2225,17 +2278,34 @@ cron.schedule(CRON_SCHEDULE, async () => {
   }
 });
 
-if (APPLE_DOWNLOADS_SYNC_ENABLED) {
-  cron.schedule(APPLE_CRON_SCHEDULE, async () => {
+// Apple auto-sync is intentionally disabled for now.
+// Keep this code commented until Apple starts returning report instances reliably.
+// if (APPLE_DOWNLOADS_SYNC_ENABLED) {
+//   cron.schedule(APPLE_CRON_SCHEDULE, async () => {
+//     try {
+//       await runAppleDownloadsSync("cron");
+//     } catch (error) {
+//       logger.error("[APPLE_DOWNLOADS] Scheduled Apple sync failed:", error);
+//     }
+//   });
+// } else {
+//   logger.info(
+//     "[APPLE_DOWNLOADS] Apple download sync is disabled because required environment variables are missing",
+//   );
+// }
+logger.info("[APPLE_DOWNLOADS] Apple auto-sync is disabled in code for now");
+
+if (GOOGLE_PLAY_DOWNLOADS_SYNC_ENABLED) {
+  cron.schedule(GOOGLE_PLAY_CRON_SCHEDULE, async () => {
     try {
-      await runAppleDownloadsSync("cron");
+      await runGooglePlayDownloadsSync("cron");
     } catch (error) {
-      logger.error("[APPLE_DOWNLOADS] Scheduled Apple sync failed:", error);
+      logger.error("[GOOGLE_PLAY_DOWNLOADS] Scheduled Google Play sync failed:", error);
     }
   });
 } else {
   logger.info(
-    "[APPLE_DOWNLOADS] Apple download sync is disabled because required environment variables are missing",
+    "[GOOGLE_PLAY_DOWNLOADS] Google Play download sync is disabled because required environment variables are missing",
   );
 }
 
@@ -2287,6 +2357,23 @@ app.post("/api/apple-downloads/sync", async (req, res) => {
     return res.status(500).json({
       error: "Failed to sync Apple app downloads",
       appleSyncEnabled: APPLE_DOWNLOADS_SYNC_ENABLED,
+      details: error.message,
+    });
+  }
+});
+
+app.post("/api/google-play-downloads/sync", async (req, res) => {
+  try {
+    const result = await runGooglePlayDownloadsSync("api");
+    return res.status(200).json({
+      message: "Google Play app downloads sync completed",
+      googlePlaySyncEnabled: GOOGLE_PLAY_DOWNLOADS_SYNC_ENABLED,
+      ...result,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      error: "Failed to sync Google Play app downloads",
+      googlePlaySyncEnabled: GOOGLE_PLAY_DOWNLOADS_SYNC_ENABLED,
       details: error.message,
     });
   }
@@ -3261,6 +3348,9 @@ async function startServer() {
     logger.info(
       `[APPLE_DOWNLOADS] Enabled=${APPLE_DOWNLOADS_SYNC_ENABLED}, Schedule=${APPLE_CRON_SCHEDULE}`,
     );
+    logger.info(
+      `[GOOGLE_PLAY_DOWNLOADS] Enabled=${GOOGLE_PLAY_DOWNLOADS_SYNC_ENABLED}, Schedule=${GOOGLE_PLAY_CRON_SCHEDULE}`,
+    );
 
     // Start Express server
     const server = app.listen(PORT, () => {
@@ -3287,11 +3377,22 @@ async function startServer() {
       logger.warn('Initial materialized views refresh failed (views may not exist yet):', err.message);
     });
 
-    if (APPLE_DOWNLOADS_SYNC_ENABLED) {
-      logger.info("[APPLE_DOWNLOADS] Running initial Apple downloads sync on startup...");
-      runAppleDownloadsSync("startup").catch((error) => {
+    // Apple startup sync is intentionally disabled for now.
+    // Keep this code commented until Apple starts returning report instances reliably.
+    // if (APPLE_DOWNLOADS_SYNC_ENABLED) {
+    //   logger.info("[APPLE_DOWNLOADS] Running initial Apple downloads sync on startup...");
+    //   runAppleDownloadsSync("startup").catch((error) => {
+    //     logger.warn(
+    //       `[APPLE_DOWNLOADS] Initial startup sync failed: ${error.message}`,
+    //     );
+    //   });
+    // }
+
+    if (GOOGLE_PLAY_DOWNLOADS_SYNC_ENABLED) {
+      logger.info("[GOOGLE_PLAY_DOWNLOADS] Running initial Google Play downloads sync on startup...");
+      runGooglePlayDownloadsSync("startup").catch((error) => {
         logger.warn(
-          `[APPLE_DOWNLOADS] Initial startup sync failed: ${error.message}`,
+          `[GOOGLE_PLAY_DOWNLOADS] Initial startup sync failed: ${error.message}`,
         );
       });
     }

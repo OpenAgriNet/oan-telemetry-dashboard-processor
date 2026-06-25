@@ -8,7 +8,14 @@ const DEFAULT_SYNC_WINDOW_DAYS = 7;
 const DEFAULT_CRON_SCHEDULE = "15 6 * * *";
 const DEFAULT_PLATFORM = "ios";
 const DEFAULT_REPORT_REQUEST_FILTER = "downloads";
+const DEFAULT_REPORT_CATEGORY = "COMMERCE";
 const DEFAULT_MIN_ROWS_TO_WRITE = 1;
+const DEFAULT_UNKNOWN_VERSION = "unknown";
+const DEFAULT_REPORT_ACCESS_TYPE = "ONGOING";
+const REPORT_LIST_PATH_BUILDERS = [
+  (appId) => `/v1/apps/${appId}/analyticsReportRequests`,
+  (appId) => `/v1/apps/${appId}/appAnalyticsReportRequests`,
+];
 const DIRECT_REPORT_URL_ENV_KEYS = [
   "APPLE_DOWNLOADS_REPORT_URL",
   "APPLE_REPORT_SEGMENT_URL",
@@ -71,6 +78,9 @@ function getAppleSyncConfigFromEnv() {
     issuerId: (process.env.APPLE_ISSUER_ID || "").trim(),
     keyId: (process.env.APPLE_KEY_ID || "").trim(),
     appId: (process.env.APPLE_APP_ID || "").trim(),
+    appResourceId:
+      (process.env.APPLE_APP_RESOURCE_ID || "").trim() ||
+      (process.env.APPLE_APP_ID || "").trim(),
     privateKey: normalizeApplePrivateKey(process.env.APPLE_PRIVATE_KEY || ""),
     cronSchedule:
       (process.env.APPLE_CRON_SCHEDULE || "").trim() || DEFAULT_CRON_SCHEDULE,
@@ -170,6 +180,11 @@ async function syncAppleDownloads({ pool, logger, now = new Date() }) {
     logger,
     jwt,
   });
+
+  if (reportBytes?.pending) {
+    return reportBytes;
+  }
+
   const reportRows = parseAppleReport(reportBytes, logger);
   const normalizedRows = normalizeAppleDownloadRows({
     rows: reportRows,
@@ -212,14 +227,27 @@ async function downloadAppleReport({ config, logger, jwt }) {
     return downloadReportSegment(config.directReportUrl);
   }
 
-  const requestsResponse = await fetchAppleJson({
-    jwt,
-    path: `/v1/apps/${config.appId}/analyticsReportRequests`,
-  });
-  const requests = Array.isArray(requestsResponse.data) ? requestsResponse.data : [];
+  const requests = await fetchExistingReportRequests({ config, jwt, logger });
 
   if (!requests.length) {
-    throw new Error("No analytics report requests were returned by Apple");
+    logger.warn(
+      "[APPLE_DOWNLOADS] No analytics report requests were returned by Apple. Attempting to create a downloads report request.",
+    );
+
+    const createResult = await createDownloadsReportRequest({
+      config,
+      jwt,
+      logger,
+    });
+
+    return {
+      pending: true,
+      status: "pending_report_generation",
+      reason: "report_request_created",
+      message:
+        "Apple Downloads report request created. Apple may take 24-48 hours to generate the first ongoing report.",
+      requestId: createResult?.data?.id || null,
+    };
   }
 
   const matchedRequest =
@@ -234,9 +262,36 @@ async function downloadAppleReport({ config, logger, jwt }) {
     `[APPLE_DOWNLOADS] Using analytics report request ${matchedRequest.id}`,
   );
 
+  const reportsPath = `/v1/analyticsReportRequests/${matchedRequest.id}/reports?filter[category]=${DEFAULT_REPORT_CATEGORY}&fields[analyticsReports]=name,category,instances`;
+  const reportsResponse = await fetchAppleJson({
+    jwt,
+    path: reportsPath,
+  });
+  const reports = Array.isArray(reportsResponse.data)
+    ? [...reportsResponse.data]
+    : [];
+
+  if (!reports.length) {
+    throw new Error(
+      `No analytics reports found for request ${matchedRequest.id}`,
+    );
+  }
+
+  const matchedReport =
+    reports.find((item) =>
+      collectReportNames(item)
+        .join(" ")
+        .toLowerCase()
+        .includes(config.reportRequestFilter),
+    ) || reports[0];
+
+  logger.info(
+    `[APPLE_DOWNLOADS] Using analytics report ${matchedReport.id}`,
+  );
+
   const instancesLink =
-    matchedRequest?.relationships?.instances?.links?.related ||
-    `/v1/analyticsReportRequests/${matchedRequest.id}/instances`;
+    matchedReport?.relationships?.instances?.links?.related ||
+    `/v1/analyticsReports/${matchedReport.id}/instances`;
   const instancesResponse = await fetchAppleJson({
     jwt,
     pathOrUrl: instancesLink,
@@ -247,7 +302,7 @@ async function downloadAppleReport({ config, logger, jwt }) {
 
   if (!instances.length) {
     throw new Error(
-      `No analytics report instances found for request ${matchedRequest.id}`,
+      `No analytics report instances found for report ${matchedReport.id}`,
     );
   }
 
@@ -300,17 +355,11 @@ async function downloadAppleReport({ config, logger, jwt }) {
 }
 
 async function fetchAppleJson({ jwt, path, pathOrUrl }) {
-  const url = pathOrUrl
-    ? toAbsoluteAppleUrl(pathOrUrl)
-    : `${APPLE_API_BASE_URL}${path}`;
-
-  const response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${jwt}`,
-      Accept: "application/json",
-    },
+  const response = await fetchAppleResponse({
+    jwt,
+    path,
+    pathOrUrl,
   });
-
   const bodyText = await response.text();
   if (!response.ok) {
     throw new Error(
@@ -322,9 +371,107 @@ async function fetchAppleJson({ jwt, path, pathOrUrl }) {
     return JSON.parse(bodyText);
   } catch (error) {
     throw new Error(
-      `Apple API returned non-JSON content for ${url}: ${truncateText(bodyText, 200)}`,
+      `Apple API returned non-JSON content for ${response.url}: ${truncateText(bodyText, 200)}`,
     );
   }
+}
+
+async function fetchAppleResponse({ jwt, path, pathOrUrl, method = "GET", body }) {
+  const url = pathOrUrl
+    ? toAbsoluteAppleUrl(pathOrUrl)
+    : `${APPLE_API_BASE_URL}${path}`;
+
+  return fetch(url, {
+    method,
+    headers: {
+      Authorization: `Bearer ${jwt}`,
+      Accept: "application/json",
+      ...(body ? { "Content-Type": "application/json" } : {}),
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+}
+
+async function fetchExistingReportRequests({ config, jwt, logger }) {
+  const errors = [];
+
+  for (const pathBuilder of REPORT_LIST_PATH_BUILDERS) {
+    const path = pathBuilder(config.appId);
+    try {
+      const response = await fetchAppleJson({
+        jwt,
+        path,
+      });
+      const requests = Array.isArray(response.data) ? response.data : [];
+      logger.info(
+        `[APPLE_DOWNLOADS] Checked ${path} and found ${requests.length} report request(s)`,
+      );
+      if (requests.length) {
+        return requests;
+      }
+    } catch (error) {
+      errors.push(`${path}: ${error.message}`);
+    }
+  }
+
+  if (errors.length) {
+    logger.warn(
+      `[APPLE_DOWNLOADS] Report request lookup attempts failed: ${errors.join(" | ")}`,
+    );
+  }
+
+  return [];
+}
+
+async function createDownloadsReportRequest({ config, jwt, logger }) {
+  const requestBody = {
+    data: {
+      type: "analyticsReportRequests",
+      attributes: {
+        accessType: DEFAULT_REPORT_ACCESS_TYPE,
+      },
+      relationships: {
+        app: {
+          data: {
+            type: "apps",
+            id: config.appResourceId,
+          },
+        },
+      },
+    },
+  };
+
+  logger.info(
+    `[APPLE_DOWNLOADS] Attempting to create Apple downloads report request via POST /v1/analyticsReportRequests for app resource ${config.appResourceId}`,
+  );
+
+  const response = await fetchAppleResponse({
+    jwt,
+    path: "/v1/analyticsReportRequests",
+    method: "POST",
+    body: requestBody,
+  });
+  const responseText = await response.text();
+
+  if (!response.ok) {
+    throw new Error(
+      `POST /v1/analyticsReportRequests -> ${response.status}: ${truncateText(responseText, 500)}`,
+    );
+  }
+
+  let parsedResponse = {};
+  try {
+    parsedResponse = responseText ? JSON.parse(responseText) : {};
+  } catch (error) {
+    parsedResponse = {
+      raw: responseText,
+    };
+  }
+
+  logger.info(
+    "[APPLE_DOWNLOADS] Successfully created report request using POST /v1/analyticsReportRequests",
+  );
+  return parsedResponse;
 }
 
 function toAbsoluteAppleUrl(pathOrUrl) {
@@ -435,7 +582,7 @@ function normalizeAppleDownloadRows({ rows, logger, syncWindowDays, now }) {
     const installsValue = getFirstValue(row, INSTALL_KEYS);
     const downloadTypeValue = getFirstValue(row, DOWNLOAD_TYPE_KEYS);
 
-    if (!dateValue || !versionValue || !installsValue) {
+    if (!dateValue || !installsValue) {
       continue;
     }
 
@@ -464,10 +611,8 @@ function normalizeAppleDownloadRows({ rows, logger, syncWindowDays, now }) {
       continue;
     }
 
-    const normalizedVersion = String(versionValue).trim();
-    if (!normalizedVersion) {
-      continue;
-    }
+    const normalizedVersion =
+      String(versionValue || "").trim() || DEFAULT_UNKNOWN_VERSION;
 
     const groupingKey = `${normalizedDate}::${normalizedVersion}`;
     const currentValue = groupedRows.get(groupingKey) || 0;

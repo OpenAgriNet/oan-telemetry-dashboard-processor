@@ -18,6 +18,7 @@ const path = require("path");
 const readline = require("readline");
 const { Pool } = require("pg");
 const dotenv = require("dotenv");
+const { pii } = require("./middleware/pii");
 
 // ── Load .env ────────────────────────────────────────────────
 dotenv.config({ path: path.join(__dirname, ".env") });
@@ -196,7 +197,7 @@ function parseTranscript(transcript) {
         const role = match[1] === "Assistant" ? "assistant" : "user";
         const content = match[2].trim();
         if (content) {
-            messages.push({ role, content });
+            messages.push({ role, content: pii.maskMessage(content) });
         }
     }
     return messages;

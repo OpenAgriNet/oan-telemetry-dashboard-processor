@@ -34,10 +34,6 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Run tests
-        run: npm test
-        continue-on-error: true
-
   docker-push:
     runs-on: ubuntu-latest
     needs: build

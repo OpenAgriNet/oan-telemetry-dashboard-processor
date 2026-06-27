@@ -1,4 +1,6 @@
 const crypto = require("crypto");
+const http = require("http");
+const https = require("https");
 const zlib = require("zlib");
 
 const APPLE_API_BASE_URL =
@@ -13,6 +15,8 @@ const DEFAULT_MIN_ROWS_TO_WRITE = 1;
 const DEFAULT_UNKNOWN_VERSION = "unknown";
 const DEFAULT_REPORT_ACCESS_TYPE = "ONGOING";
 const DEFAULT_APPLE_API_MAX_ATTEMPTS = 3;
+const DEFAULT_APPLE_REQUEST_TIMEOUT_MS = 15000;
+const DEFAULT_APPLE_MAX_REDIRECTS = 5;
 const APPLE_RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
 const REPORT_LIST_PATH_BUILDERS = [
   (appId) => `/v1/apps/${appId}/analyticsReportRequests`,
@@ -419,14 +423,17 @@ async function fetchAppleResponse({ jwt, path, pathOrUrl, method = "GET", body }
     ? toAbsoluteAppleUrl(pathOrUrl)
     : `${APPLE_API_BASE_URL}${path}`;
 
-  return fetch(url, {
+  const payload = body ? JSON.stringify(body) : null;
+
+  return executeHttpRequest({
+    url,
     method,
     headers: {
       Authorization: `Bearer ${jwt}`,
       Accept: "application/json",
-      ...(body ? { "Content-Type": "application/json" } : {}),
+      ...(payload ? { "Content-Type": "application/json" } : {}),
     },
-    ...(body ? { body: JSON.stringify(body) } : {}),
+    body: payload,
   });
 }
 
@@ -525,15 +532,113 @@ function sleep(delayMs) {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
+function executeHttpRequest({
+  url,
+  method = "GET",
+  headers = {},
+  body = null,
+  timeoutMs = DEFAULT_APPLE_REQUEST_TIMEOUT_MS,
+  redirectCount = 0,
+}) {
+  return new Promise((resolve, reject) => {
+    const parsedUrl = new URL(url);
+    const transport = parsedUrl.protocol === "http:" ? http : https;
+
+    const request = transport.request(
+      parsedUrl,
+      {
+        method,
+        headers: {
+          ...headers,
+          ...(body ? { "Content-Length": Buffer.byteLength(body) } : {}),
+        },
+      },
+      (response) => {
+        const chunks = [];
+
+        response.on("data", (chunk) => {
+          chunks.push(chunk);
+        });
+
+        response.on("end", async () => {
+          const responseBody = Buffer.concat(chunks);
+          const statusCode = response.statusCode || 0;
+
+          if (
+            statusCode >= 300 &&
+            statusCode < 400 &&
+            response.headers.location
+          ) {
+            if (redirectCount >= DEFAULT_APPLE_MAX_REDIRECTS) {
+              reject(
+                new Error(
+                  `Apple request exceeded redirect limit for ${parsedUrl.toString()}`,
+                ),
+              );
+              return;
+            }
+
+            const redirectedUrl = new URL(
+              response.headers.location,
+              parsedUrl,
+            ).toString();
+
+            try {
+              const redirectedResponse = await executeHttpRequest({
+                url: redirectedUrl,
+                method: "GET",
+                headers,
+                timeoutMs,
+                redirectCount: redirectCount + 1,
+              });
+              resolve(redirectedResponse);
+            } catch (error) {
+              reject(error);
+            }
+            return;
+          }
+
+          resolve({
+            ok: statusCode >= 200 && statusCode < 300,
+            status: statusCode,
+            url: parsedUrl.toString(),
+            headers: response.headers,
+            body: responseBody,
+            text: async () => responseBody.toString("utf8"),
+          });
+        });
+      },
+    );
+
+    request.setTimeout(timeoutMs, () => {
+      request.destroy(
+        new Error(
+          `Request timed out after ${timeoutMs}ms for ${parsedUrl.toString()}`,
+        ),
+      );
+    });
+
+    request.on("error", (error) => {
+      reject(error);
+    });
+
+    if (body) {
+      request.write(body);
+    }
+
+    request.end();
+  });
+}
+
 async function downloadReportSegment(reportUrl) {
-  const response = await fetch(reportUrl, {
+  const response = await executeHttpRequest({
+    url: reportUrl,
+    method: "GET",
     headers: {
       Accept: "*/*",
     },
   });
-
-  const arrayBuffer = await response.arrayBuffer();
-  const bytes = Buffer.from(arrayBuffer);
+  const bytes = response.body;
 
   if (!response.ok) {
     throw new Error(

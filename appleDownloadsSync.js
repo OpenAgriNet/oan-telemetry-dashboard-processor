@@ -12,6 +12,8 @@ const DEFAULT_REPORT_CATEGORY = "COMMERCE";
 const DEFAULT_MIN_ROWS_TO_WRITE = 1;
 const DEFAULT_UNKNOWN_VERSION = "unknown";
 const DEFAULT_REPORT_ACCESS_TYPE = "ONGOING";
+const DEFAULT_APPLE_API_MAX_ATTEMPTS = 3;
+const APPLE_RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
 const REPORT_LIST_PATH_BUILDERS = [
   (appId) => `/v1/apps/${appId}/analyticsReportRequests`,
   (appId) => `/v1/apps/${appId}/appAnalyticsReportRequests`,
@@ -51,6 +53,8 @@ const INSTALL_KEYS = [
   "downloads",
   "installs",
   "units",
+  "counts",
+  "Counts",
   "First-Time Downloads",
   "First Time Downloads",
   "Downloads",
@@ -266,6 +270,8 @@ async function downloadAppleReport({ config, logger, jwt }) {
   const reportsResponse = await fetchAppleJson({
     jwt,
     path: reportsPath,
+    logger,
+    requestLabel: `reports for request ${matchedRequest.id}`,
   });
   const reports = Array.isArray(reportsResponse.data)
     ? [...reportsResponse.data]
@@ -295,6 +301,8 @@ async function downloadAppleReport({ config, logger, jwt }) {
   const instancesResponse = await fetchAppleJson({
     jwt,
     pathOrUrl: instancesLink,
+    logger,
+    requestLabel: `instances for report ${matchedReport.id}`,
   });
   const instances = Array.isArray(instancesResponse.data)
     ? [...instancesResponse.data]
@@ -323,6 +331,8 @@ async function downloadAppleReport({ config, logger, jwt }) {
   const segmentsResponse = await fetchAppleJson({
     jwt,
     pathOrUrl: segmentsLink,
+    logger,
+    requestLabel: `segments for instance ${latestInstance.id}`,
   });
   const segments = Array.isArray(segmentsResponse.data)
     ? [...segmentsResponse.data]
@@ -354,26 +364,54 @@ async function downloadAppleReport({ config, logger, jwt }) {
   return downloadReportSegment(reportUrl);
 }
 
-async function fetchAppleJson({ jwt, path, pathOrUrl }) {
-  const response = await fetchAppleResponse({
-    jwt,
-    path,
-    pathOrUrl,
-  });
-  const bodyText = await response.text();
-  if (!response.ok) {
-    throw new Error(
+async function fetchAppleJson({
+  jwt,
+  path,
+  pathOrUrl,
+  logger,
+  requestLabel,
+  maxAttempts = DEFAULT_APPLE_API_MAX_ATTEMPTS,
+}) {
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const response = await fetchAppleResponse({
+      jwt,
+      path,
+      pathOrUrl,
+    });
+    const bodyText = await response.text();
+
+    if (response.ok) {
+      try {
+        return JSON.parse(bodyText);
+      } catch (error) {
+        throw new Error(
+          `Apple API returned non-JSON content for ${response.url}: ${truncateText(bodyText, 200)}`,
+        );
+      }
+    }
+
+    lastError = new Error(
       `Apple API request failed (${response.status}): ${truncateText(bodyText, 400)}`,
     );
+
+    const shouldRetry =
+      APPLE_RETRYABLE_STATUS_CODES.has(response.status) && attempt < maxAttempts;
+    if (!shouldRetry) {
+      throw lastError;
+    }
+
+    const delayMs = attempt * 1000;
+    if (logger) {
+      logger.warn(
+        `[APPLE_DOWNLOADS] Retrying ${requestLabel || pathOrUrl || path || "Apple API request"} after ${response.status} response (attempt ${attempt}/${maxAttempts}, waiting ${delayMs}ms)`,
+      );
+    }
+    await sleep(delayMs);
   }
 
-  try {
-    return JSON.parse(bodyText);
-  } catch (error) {
-    throw new Error(
-      `Apple API returned non-JSON content for ${response.url}: ${truncateText(bodyText, 200)}`,
-    );
-  }
+  throw lastError || new Error("Apple API request failed");
 }
 
 async function fetchAppleResponse({ jwt, path, pathOrUrl, method = "GET", body }) {
@@ -401,6 +439,8 @@ async function fetchExistingReportRequests({ config, jwt, logger }) {
       const response = await fetchAppleJson({
         jwt,
         path,
+        logger,
+        requestLabel: path,
       });
       const requests = Array.isArray(response.data) ? response.data : [];
       logger.info(
@@ -479,6 +519,10 @@ function toAbsoluteAppleUrl(pathOrUrl) {
     return pathOrUrl;
   }
   return `${APPLE_API_BASE_URL}${pathOrUrl}`;
+}
+
+function sleep(delayMs) {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
 async function downloadReportSegment(reportUrl) {

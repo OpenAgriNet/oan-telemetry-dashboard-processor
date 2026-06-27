@@ -2288,22 +2288,19 @@ cron.schedule(CRON_SCHEDULE, async () => {
   }
 });
 
-// Apple auto-sync is intentionally disabled for now.
-// Keep this code commented until Apple starts returning report instances reliably.
-// if (APPLE_DOWNLOADS_SYNC_ENABLED) {
-//   cron.schedule(APPLE_CRON_SCHEDULE, async () => {
-//     try {
-//       await runAppleDownloadsSync("cron");
-//     } catch (error) {
-//       logger.error("[APPLE_DOWNLOADS] Scheduled Apple sync failed:", error);
-//     }
-//   });
-// } else {
-//   logger.info(
-//     "[APPLE_DOWNLOADS] Apple download sync is disabled because required environment variables are missing",
-//   );
-// }
-logger.info("[APPLE_DOWNLOADS] Apple auto-sync is disabled in code for now");
+if (APPLE_DOWNLOADS_SYNC_ENABLED) {
+  cron.schedule(APPLE_CRON_SCHEDULE, async () => {
+    try {
+      await runAppleDownloadsSync("cron");
+    } catch (error) {
+      logger.error("[APPLE_DOWNLOADS] Scheduled Apple sync failed:", error);
+    }
+  });
+} else {
+  logger.info(
+    "[APPLE_DOWNLOADS] Apple download sync is disabled because required environment variables are missing",
+  );
+}
 
 if (GOOGLE_PLAY_DOWNLOADS_SYNC_ENABLED) {
   cron.schedule(GOOGLE_PLAY_CRON_SCHEDULE, async () => {
@@ -3387,16 +3384,14 @@ async function startServer() {
       logger.warn('Initial materialized views refresh failed (views may not exist yet):', err.message);
     });
 
-    // Apple startup sync is intentionally disabled for now.
-    // Keep this code commented until Apple starts returning report instances reliably.
-    // if (APPLE_DOWNLOADS_SYNC_ENABLED) {
-    //   logger.info("[APPLE_DOWNLOADS] Running initial Apple downloads sync on startup...");
-    //   runAppleDownloadsSync("startup").catch((error) => {
-    //     logger.warn(
-    //       `[APPLE_DOWNLOADS] Initial startup sync failed: ${error.message}`,
-    //     );
-    //   });
-    // }
+    if (APPLE_DOWNLOADS_SYNC_ENABLED) {
+      logger.info("[APPLE_DOWNLOADS] Running initial Apple downloads sync on startup...");
+      runAppleDownloadsSync("startup").catch((error) => {
+        logger.warn(
+          `[APPLE_DOWNLOADS] Initial startup sync failed: ${error.message}`,
+        );
+      });
+    }
 
     if (GOOGLE_PLAY_DOWNLOADS_SYNC_ENABLED) {
       logger.info("[GOOGLE_PLAY_DOWNLOADS] Running initial Google Play downloads sync on startup...");

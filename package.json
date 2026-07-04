@@ -18,7 +18,7 @@
     "backfill:pii:job:dry-run": "node scripts/backfill-pii-masking-job.js --dry-run",
     "backfill:pii:sql": "node scripts/backfill-pii-sql-column.js",
     "backfill:pii:sql:dry-run": "node scripts/backfill-pii-sql-column.js --dry-run",
-    "backfill:prod:qid-pii": "bash scripts/prod-qid-pii-backfill.sh"
+    "backfill:prod:qid-pii": "sh scripts/prod-qid-pii-backfill.sh"
   },
   "dependencies": {
     "dotenv": "^16.3.1",

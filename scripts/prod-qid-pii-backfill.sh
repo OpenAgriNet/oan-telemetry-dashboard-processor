@@ -1,5 +1,5 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 DRY_RUN=false
 SKIP_QID=false
@@ -62,16 +62,17 @@ for arg in "$@"; do
 done
 
 require_env() {
-  local name="$1"
-  if [[ -z "${!name:-}" ]]; then
+  name="$1"
+  eval "value=\${$name:-}"
+  if [ -z "$value" ]; then
     echo "Missing required env var: $name" >&2
     exit 1
   fi
 }
 
 run_node_sql() {
-  local label="$1"
-  local sql="$2"
+  label="$1"
+  sql="$2"
   echo
   echo "==> $label"
   SQL_TO_RUN="$sql" node - <<'NODE'
@@ -107,7 +108,7 @@ require_env DB_NAME
 require_env DB_PASSWORD
 require_env DB_PORT
 
-if [[ "$DRY_RUN" != "true" && "${I_UNDERSTAND_PROD_BACKFILL:-}" != "true" ]]; then
+if [ "$DRY_RUN" != "true" ] && [ "${I_UNDERSTAND_PROD_BACKFILL:-}" != "true" ]; then
   cat >&2 <<'EOF'
 Refusing to run mutating production backfill.
 
@@ -139,10 +140,10 @@ run_node_sql "qid state before" "
   FROM public.questions
 "
 
-if [[ "$SKIP_QID" != "true" ]]; then
+if [ "$SKIP_QID" != "true" ]; then
   echo
   echo "==> questions.qid refill"
-  if [[ "$DRY_RUN" == "true" ]]; then
+  if [ "$DRY_RUN" = "true" ]; then
     QID_BACKFILL_BATCH_SIZE="$QID_BATCH_SIZE" node scripts/backfill-questions-qid.js --dry-run
   else
     QID_BACKFILL_BATCH_SIZE="$QID_BATCH_SIZE" node scripts/backfill-questions-qid.js
@@ -272,16 +273,18 @@ audit_pii
 AUDIT_BEFORE_STATUS=$?
 set -e
 
-if [[ "$SKIP_PII" != "true" ]]; then
+if [ "$SKIP_PII" != "true" ]; then
   echo
   echo "==> PII SQL column masking"
-  if [[ "$DRY_RUN" == "true" ]]; then
+  if [ "$DRY_RUN" = "true" ]; then
     node scripts/backfill-pii-sql-column.js --dry-run --batch-size="$PII_BATCH_SIZE"
   else
-    for pass in $(seq 1 "$PII_PASSES"); do
+    pass=1
+    while [ "$pass" -le "$PII_PASSES" ]; do
       echo
       echo "==> PII pass $pass/$PII_PASSES"
       node scripts/backfill-pii-sql-column.js --batch-size="$PII_BATCH_SIZE"
+      pass=$((pass + 1))
     done
   fi
 else

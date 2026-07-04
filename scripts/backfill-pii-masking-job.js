@@ -16,6 +16,7 @@
  */
 
 const path = require("path");
+const fs = require("fs");
 const { Pool } = require("pg");
 const dotenv = require("dotenv");
 const { pii } = require("../middleware/pii");
@@ -24,6 +25,7 @@ dotenv.config({ path: path.join(__dirname, "..", ".env") });
 
 const dryRun = process.argv.includes("--dry-run");
 const rowLog = process.argv.includes("--row-log");
+const candidateFilter = !process.argv.includes("--no-candidate-filter");
 const batchSizeArg = process.argv.find((arg) => arg.startsWith("--batch-size="));
 const progressEveryArg = process.argv.find((arg) =>
   arg.startsWith("--progress-every="),
@@ -131,8 +133,35 @@ function valuesEqual(a, b) {
   return String(a) === String(b);
 }
 
-async function getTableRowCount(client, tableName) {
-  const result = await client.query(`SELECT COUNT(*)::bigint AS count FROM ${tableName}`);
+function quoteIdent(identifier) {
+  return `"${identifier.replace(/"/g, '""')}"`;
+}
+
+function buildCandidatePredicate(spec) {
+  if (!candidateFilter) return "";
+
+  return spec.columns
+    .map(
+      (column) =>
+        `public.contains_pii_candidate(${quoteIdent(column.name)}::text)`,
+    )
+    .join(" OR ");
+}
+
+async function ensurePiiCandidateFunction(client) {
+  if (!candidateFilter) return;
+
+  const functionSql = fs.readFileSync(
+    path.join(__dirname, "..", "migrations", "20260624_pii_candidate_function.sql"),
+    "utf8",
+  );
+  await client.query(functionSql);
+}
+
+async function getTableRowCount(client, spec) {
+  const candidatePredicate = buildCandidatePredicate(spec);
+  const whereClause = candidatePredicate ? ` WHERE ${candidatePredicate}` : "";
+  const result = await client.query(`SELECT COUNT(*)::bigint AS count FROM ${spec.table}${whereClause}`);
   return Number(result.rows[0]?.count || 0);
 }
 
@@ -163,7 +192,7 @@ async function backfillTable(client, spec, totalRows) {
     };
 
   console.log(
-    `[start] ${spec.table}: total_rows=${formatNumber(totalRows)} batch_size=${formatNumber(BATCH_SIZE)} dry_run=${dryRun}`,
+    `[start] ${spec.table}: candidate_rows=${formatNumber(totalRows)} batch_size=${formatNumber(BATCH_SIZE)} dry_run=${dryRun} candidate_filter=${candidateFilter}`,
   );
 
   for (;;) {
@@ -173,21 +202,26 @@ async function backfillTable(client, spec, totalRows) {
     // loop on the same batch). To avoid any Date/TZ round-trip, we carry the
     // cursor as a raw ISO string: read created_at out as ::text and bind it back
     // as text::timestamp so it compares byte-for-byte against the stored value.
-    const query =
-      spec.pagination === "id"
-        ? {
-            text: `SELECT ${selectCols} FROM ${spec.table} WHERE ${spec.idColumn} > $1 ORDER BY ${spec.idColumn} ASC LIMIT $2`,
-            values: [lastId ?? 0, BATCH_SIZE],
-          }
-        : lastCreatedAt === null
-          ? {
-              text: `SELECT ${selectCols}, created_at::text AS created_at FROM ${spec.table} ORDER BY created_at ASC, ${spec.idColumn} ASC LIMIT $1`,
-              values: [BATCH_SIZE],
-            }
-          : {
-              text: `SELECT ${selectCols}, created_at::text AS created_at FROM ${spec.table} WHERE (created_at, ${spec.idColumn}) > ($1::timestamp, $2::uuid) ORDER BY created_at ASC, ${spec.idColumn} ASC LIMIT $3`,
-              values: [lastCreatedAt, lastId, BATCH_SIZE],
-            };
+    let query;
+    if (spec.pagination === "id") {
+      const candidatePredicate = buildCandidatePredicate(spec);
+      query = {
+        text: `SELECT ${selectCols} FROM ${spec.table} WHERE ${spec.idColumn} > $1${candidatePredicate ? ` AND (${candidatePredicate})` : ""} ORDER BY ${spec.idColumn} ASC LIMIT $2`,
+        values: [lastId ?? 0, BATCH_SIZE],
+      };
+    } else if (lastCreatedAt === null) {
+      const candidatePredicate = buildCandidatePredicate(spec);
+      query = {
+        text: `SELECT ${selectCols}, created_at::text AS created_at FROM ${spec.table}${candidatePredicate ? ` WHERE (${candidatePredicate})` : ""} ORDER BY created_at ASC, ${spec.idColumn} ASC LIMIT $1`,
+        values: [BATCH_SIZE],
+      };
+    } else {
+      const candidatePredicate = buildCandidatePredicate(spec);
+      query = {
+        text: `SELECT ${selectCols}, created_at::text AS created_at FROM ${spec.table} WHERE (created_at, ${spec.idColumn}) > ($1::timestamp, $2::uuid)${candidatePredicate ? ` AND (${candidatePredicate})` : ""} ORDER BY created_at ASC, ${spec.idColumn} ASC LIMIT $3`,
+        values: [lastCreatedAt, lastId, BATCH_SIZE],
+      };
+    }
 
     const { rows } = await client.query(query.text, query.values);
     if (rows.length === 0) break;
@@ -313,8 +347,13 @@ async function main() {
 
   try {
     console.log(
-      `PII backfill job starting (batch=${BATCH_SIZE}, progress_every=${PROGRESS_EVERY}, dryRun=${dryRun})`,
+      `PII backfill job starting (batch=${BATCH_SIZE}, progress_every=${PROGRESS_EVERY}, dryRun=${dryRun}, candidate_filter=${candidateFilter})`,
     );
+
+    await ensurePiiCandidateFunction(client);
+    if (candidateFilter) {
+      console.log("[schema] ensured public.contains_pii_candidate(text)");
+    }
 
     for (const spec of TABLES) {
       const exists = await client.query(
@@ -327,7 +366,7 @@ async function main() {
         continue;
       }
 
-      const totalRows = await getTableRowCount(client, spec.table);
+      const totalRows = await getTableRowCount(client, spec);
       jobStats.push(await backfillTable(client, spec, totalRows));
     }
 

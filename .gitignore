@@ -120,3 +120,4 @@ temp/
 
 # Remix build output
 .build/
+package-lock.json

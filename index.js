@@ -50,9 +50,9 @@ const pool = new Pool({
   max: parseInt(process.env.DB_POOL_MAX || "20", 10),
   idleTimeoutMillis: parseInt(process.env.DB_IDLE_TIMEOUT_MS || "30000", 10),
   connectionTimeoutMillis: parseInt(process.env.DB_CONN_TIMEOUT_MS || "5000", 10),
-  // ssl: {
-  //   rejectUnauthorized: false
-  // }
+  ssl: {
+    rejectUnauthorized: false
+  }
 });
 
 // async function ensureVillagesSeeded() {
@@ -1665,18 +1665,52 @@ function isBecknExtNetworkEvent(event) {
   return false;
 }
 
+/**
+ * Resolve lifecycle keys for beckn_ext_events.
+ * Prefer explicit session/question tags from provider; fall back to Beckn
+ * transaction_id / message_id when tags were empty (common when tags missing).
+ * Empty strings are treated as missing (not valid UUIDs).
+ */
 function getBecknLifecycleKeys(event) {
   const target = event.edata?.eks?.target || {};
   const nad = target.networkApiDetails || {};
-  const sessionId = asUuidOrNull(
-    nad.session_id || target.session_id || event.sid,
-  );
-  const questionId = asUuidOrNull(
-    nad.question_id ||
-      target.question_id ||
-      event.qid ||
-      event.edata?.eks?.qid,
-  );
+  const nadInput = asJsonObject(nad.input);
+  // Envelope form: input.beckn.transaction_id  OR raw Beckn body: input.context.transaction_id
+  const becknMeta = asJsonObject(nadInput.beckn);
+  const becknContext = asJsonObject(nadInput.context);
+
+  // event._beckn_* set by the log loop when an earlier sibling event had IDs
+  const sessionCandidates = [
+    event._beckn_session_id,
+    nad.session_id,
+    target.session_id,
+    event.sid,
+    target.beckn_transaction_id,
+    becknMeta.transaction_id,
+    becknContext.transaction_id,
+  ];
+  const questionCandidates = [
+    event._beckn_question_id,
+    nad.question_id,
+    target.question_id,
+    event.qid,
+    event.edata?.eks?.qid,
+    target.beckn_message_id,
+    becknMeta.message_id,
+    becknContext.message_id,
+  ];
+
+  let sessionId = null;
+  for (const c of sessionCandidates) {
+    sessionId = asUuidOrNull(c);
+    if (sessionId) break;
+  }
+  let questionId = null;
+  for (const c of questionCandidates) {
+    questionId = asUuidOrNull(c);
+    if (questionId) break;
+  }
+
   return { sessionId, questionId };
 }
 
@@ -1723,19 +1757,22 @@ function classifyBecknNetworkPhase(event) {
 async function processBecknExtEvent(client, event) {
   const { sessionId, questionId } = getBecknLifecycleKeys(event);
   if (!sessionId || !questionId) {
-    logger.debug(
-      "processBecknExtEvent: missing session_id/question_id UUID, skipping",
+    logger.warn(
+      `processBecknExtEvent: missing session_id/question_id UUID, skipping eid=${event?.eid} type=${event?.edata?.eks?.type || ""} sid=${event?.sid || ""} qid=${event?.qid || ""}`,
     );
     return false;
   }
 
   const phase = classifyBecknNetworkPhase(event);
   if (!phase) {
-    logger.debug(
-      `processBecknExtEvent: could not classify phase for eid=${event.eid}`,
+    logger.warn(
+      `processBecknExtEvent: could not classify phase for eid=${event.eid} type=${event?.edata?.eks?.type || ""}`,
     );
     return false;
   }
+  logger.debug(
+    `processBecknExtEvent: phase=${phase} session=${sessionId} question=${questionId} eid=${event?.eid} type=${event?.edata?.eks?.type || ""}`,
+  );
 
   const target = event.edata?.eks?.target || {};
   const nad = target.networkApiDetails || {};
@@ -2064,6 +2101,9 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()} `) {
       for (let logIndex = 0; logIndex < chunk.length; logIndex++) {
         const log = chunk[logIndex];
         const events = parseTelemetryMessage(log.message, batchId, logIndex + 1);
+        // Within one winston log, EXT_API events often lack session/question tags;
+        // carry IDs from sibling FLOW_START / BPP events in the same batch.
+        let becknKeysHint = { sessionId: null, questionId: null };
 
         for (let eventIndex = 0; eventIndex < events.length; eventIndex++) {
           const event = events[eventIndex];
@@ -2078,6 +2118,13 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()} `) {
           // Beckn / external network lifecycle → beckn_ext_events (aggregated by session+question)
           // Always continue here so network events never fall through to users/questions/etc.
           if (isBecknExtNetworkEvent(event)) {
+            const resolved = getBecknLifecycleKeys(event);
+            if (resolved.sessionId && resolved.questionId) {
+              becknKeysHint = resolved;
+            } else if (becknKeysHint.sessionId && becknKeysHint.questionId) {
+              event._beckn_session_id = becknKeysHint.sessionId;
+              event._beckn_question_id = becknKeysHint.questionId;
+            }
             const ok = await processBecknExtEvent(client, event);
             if (ok) {
               eventProcessed = true;
@@ -2259,6 +2306,9 @@ async function processTelemetryLogsFast(batchId = `fast_${Date.now()}`) {
 
       for (const log of chunk) {
         const events = parseTelemetryMessage(log.message, batchId, 0);
+        // Within one winston log, EXT_API events often lack session/question tags;
+        // carry IDs from sibling FLOW_START / BPP events in the same batch.
+        let becknKeysHint = { sessionId: null, questionId: null };
 
         for (let eventIndex = 0; eventIndex < events.length; eventIndex++) {
           const event = events[eventIndex];
@@ -2271,6 +2321,13 @@ async function processTelemetryLogsFast(batchId = `fast_${Date.now()}`) {
           // Beckn / external network lifecycle → beckn_ext_events (aggregated by session+question)
           // Always continue here so network events never fall through to users/questions/etc.
           if (isBecknExtNetworkEvent(event)) {
+            const resolved = getBecknLifecycleKeys(event);
+            if (resolved.sessionId && resolved.questionId) {
+              becknKeysHint = resolved;
+            } else if (becknKeysHint.sessionId && becknKeysHint.questionId) {
+              event._beckn_session_id = becknKeysHint.sessionId;
+              event._beckn_question_id = becknKeysHint.questionId;
+            }
             const ok = await processBecknExtEvent(client, event);
             if (ok) {
               eventProcessed = true;

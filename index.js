@@ -573,6 +573,61 @@ async function ensureTablesExist() {
       END $$;
     `);
 
+    // Aggregated Beckn / external network API lifecycle (one row per session_id + question_id)
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.beckn_ext_events (
+        id                          BIGSERIAL PRIMARY KEY,
+        session_id                  UUID NOT NULL,
+        question_id                 UUID NOT NULL,
+        service_name                TEXT,
+        route_name                  TEXT,
+        channel                     TEXT,
+        beckn_action                TEXT,
+        beckn_domain                TEXT,
+        beckn_transaction_id        UUID,
+        beckn_message_id            UUID,
+        request_path                TEXT,
+        start_ets                   TIMESTAMPTZ,
+        end_ets                     TIMESTAMPTZ,
+        duration_ms                 INT,
+        flow_status                 TEXT,
+        flow_success                BOOLEAN,
+        flow_error                  TEXT,
+        ext_api_service             TEXT,
+        ext_api_method              TEXT,
+        ext_api_url                 TEXT,
+        ext_api_request             JSONB,
+        ext_api_response            JSONB,
+        ext_api_status_code         INT,
+        ext_api_latency_ms          INT,
+        ext_api_success             BOOLEAN,
+        ext_api_error               TEXT,
+        beckn_api_service           TEXT,
+        beckn_method                TEXT,
+        beckn_url                   TEXT,
+        beckn_request               JSONB,
+        beckn_response              JSONB,
+        beckn_status_code           INT,
+        beckn_latency_ms            INT,
+        beckn_success               BOOLEAN,
+        beckn_error                 TEXT,
+        created_at                  TIMESTAMPTZ DEFAULT now(),
+        UNIQUE (session_id, question_id)
+      )
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_bee_session ON public.beckn_ext_events(session_id)
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_bee_txn ON public.beckn_ext_events(beckn_transaction_id)
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_bee_start_ets ON public.beckn_ext_events(start_ets)
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_bee_service ON public.beckn_ext_events(service_name)
+    `);
+
     // Create generic UI interaction events table for OE_INTERACT telemetry
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.ui_interaction_events(
@@ -1438,6 +1493,547 @@ mobile = COALESCE(EXCLUDED.mobile, users.mobile),
 //   }
 // }
 
+// ===== Beckn / external network API lifecycle (beckn_ext_events) =====
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function asUuidOrNull(value) {
+  if (value == null || value === "") return null;
+  const s = String(value).trim();
+  return UUID_RE.test(s) ? s : null;
+}
+
+function etsToDate(ets) {
+  if (ets == null || ets === "") return null;
+  const n = Number(ets);
+  if (!Number.isFinite(n)) return null;
+  // Telemetry ets is epoch millis
+  return new Date(n);
+}
+
+/**
+ * Deep-sanitize values so JSON.stringify never emits invalid JSON for PG JSONB
+ * (NaN/Infinity/BigInt/circular/undefined/functions).
+ */
+function sanitizeForJson(value, seen = new WeakSet()) {
+  if (value === undefined) return null;
+  if (value === null) return null;
+  if (typeof value === "bigint") return value.toString();
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "function" || typeof value === "symbol") return null;
+  if (value instanceof Date) {
+    const t = value.getTime();
+    return Number.isFinite(t) ? value.toISOString() : null;
+  }
+  if (Buffer.isBuffer(value)) {
+    const text = value.toString("utf8");
+    try {
+      return sanitizeForJson(JSON.parse(text), seen);
+    } catch {
+      return text;
+    }
+  }
+  if (typeof value === "object") {
+    if (seen.has(value)) return "[Circular]";
+    seen.add(value);
+    if (Array.isArray(value)) {
+      return value.map((item) => sanitizeForJson(item, seen));
+    }
+    const out = {};
+    for (const [key, child] of Object.entries(value)) {
+      if (child === undefined) continue;
+      if (typeof child === "function") continue;
+      out[key] = sanitizeForJson(child, seen);
+    }
+    return out;
+  }
+  return String(value);
+}
+
+/**
+ * Always return null or a valid JSON text string for `$n::jsonb` binds.
+ * Never pass raw JS objects (avoids driver edge-cases with invalid JSON).
+ */
+function asJsonbParam(value) {
+  if (value === undefined || value === null) return null;
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    try {
+      // Re-serialize so the result is guaranteed valid JSON text
+      return JSON.stringify(sanitizeForJson(JSON.parse(trimmed)));
+    } catch {
+      // Plain / invalid text → store as a JSON string
+      return JSON.stringify(trimmed);
+    }
+  }
+
+  try {
+    return JSON.stringify(sanitizeForJson(value));
+  } catch (err) {
+    return JSON.stringify({
+      _unserializable: true,
+      error: String(err.message || err),
+      preview: String(value).slice(0, 500),
+    });
+  }
+}
+
+/** Parse input for field extraction (route_name, beckn, …). */
+function asJsonObject(value) {
+  if (value == null) return {};
+  if (typeof value === "object" && !Array.isArray(value) && !(value instanceof Date) && !Buffer.isBuffer(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+    } catch {
+      /* ignore */
+    }
+  }
+  return {};
+}
+
+function asIntOrNull(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.trunc(n) : null;
+}
+
+function asTextOrNull(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value === "string") return value;
+  if (typeof value === "object") {
+    try {
+      return JSON.stringify(sanitizeForJson(value));
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value);
+}
+
+function getNadInputObject(nad) {
+  return asJsonObject(nad?.input);
+}
+
+/**
+ * Detect network-provider Beckn lifecycle events that should land in beckn_ext_events
+ * (not the generic chat/user processors).
+ */
+function isBecknExtNetworkEvent(event) {
+  if (!event || !event.eid) return false;
+
+  const eks = event.edata?.eks || {};
+  const target = eks.target || {};
+  const nad = target.networkApiDetails;
+  const eksType = String(eks.type || "").toUpperCase();
+  const apiType = String(nad?.apiType || "").toUpperCase();
+  const nadType = String(nad?.type || "").toUpperCase();
+
+  if (nad) return true;
+
+  if (
+    eksType === "FLOW_START" ||
+    eksType === "FLOW_END" ||
+    eksType === "EXT_API_CALL" ||
+    eksType === "BPP_NETWORK_API_CALL"
+  ) {
+    return true;
+  }
+
+  if (
+    (event.eid === "OE_START" || event.eid === "OE_END") &&
+    (event.uid === "network-provider-service" ||
+      event.did === "network-provider-device" ||
+      target.beckn_action ||
+      (target.service_name && (target.session_id || event.sid) && (target.question_id || event.qid)))
+  ) {
+    return true;
+  }
+
+  if (apiType === "EXT_API" || apiType === "BPP_NETWORK") return true;
+  if (nadType === "EXT_API_CALL" || nadType === "BPP_NETWORK_API_CALL") return true;
+
+  return false;
+}
+
+/**
+ * Resolve lifecycle keys for beckn_ext_events.
+ * Prefer explicit session/question tags from provider; fall back to Beckn
+ * transaction_id / message_id when tags were empty (common when tags missing).
+ * Empty strings are treated as missing (not valid UUIDs).
+ */
+function getBecknLifecycleKeys(event) {
+  const target = event.edata?.eks?.target || {};
+  const nad = target.networkApiDetails || {};
+  const nadInput = asJsonObject(nad.input);
+  // Envelope form: input.beckn.transaction_id  OR raw Beckn body: input.context.transaction_id
+  const becknMeta = asJsonObject(nadInput.beckn);
+  const becknContext = asJsonObject(nadInput.context);
+
+  // event._beckn_* set by the log loop when an earlier sibling event had IDs
+  const sessionCandidates = [
+    event._beckn_session_id,
+    nad.session_id,
+    target.session_id,
+    event.sid,
+    target.beckn_transaction_id,
+    becknMeta.transaction_id,
+    becknContext.transaction_id,
+  ];
+  const questionCandidates = [
+    event._beckn_question_id,
+    nad.question_id,
+    target.question_id,
+    event.qid,
+    event.edata?.eks?.qid,
+    target.beckn_message_id,
+    becknMeta.message_id,
+    becknContext.message_id,
+  ];
+
+  let sessionId = null;
+  for (const c of sessionCandidates) {
+    sessionId = asUuidOrNull(c);
+    if (sessionId) break;
+  }
+  let questionId = null;
+  for (const c of questionCandidates) {
+    questionId = asUuidOrNull(c);
+    if (questionId) break;
+  }
+
+  return { sessionId, questionId };
+}
+
+function classifyBecknNetworkPhase(event) {
+  const eks = event.edata?.eks || {};
+  const target = eks.target || {};
+  const nad = target.networkApiDetails || {};
+  const eksType = String(eks.type || "").toUpperCase();
+  const apiType = String(nad.apiType || "").toUpperCase();
+  const nadType = String(nad.type || "").toUpperCase();
+
+  if (event.eid === "OE_START" || eksType === "FLOW_START") return "FLOW_START";
+  if (event.eid === "OE_END" || eksType === "FLOW_END") return "FLOW_END";
+
+  if (
+    eksType === "EXT_API_CALL" ||
+    apiType === "EXT_API" ||
+    nadType === "EXT_API_CALL"
+  ) {
+    return "EXT_API";
+  }
+
+  if (
+    eksType === "BPP_NETWORK_API_CALL" ||
+    apiType === "BPP_NETWORK" ||
+    nadType === "BPP_NETWORK_API_CALL"
+  ) {
+    return "BPP_NETWORK";
+  }
+
+  // Fallback: any OE_ITEM_RESPONSE with networkApiDetails
+  if (event.eid === "OE_ITEM_RESPONSE" && target.networkApiDetails) {
+    return "EXT_API";
+  }
+
+  return null;
+}
+
+/**
+ * Upsert one Beckn/network lifecycle event into beckn_ext_events.
+ * Multiple events (START + EXT + BPP + END) merge into one row keyed by
+ * (session_id, question_id).
+ */
+async function processBecknExtEvent(client, event) {
+  const { sessionId, questionId } = getBecknLifecycleKeys(event);
+  if (!sessionId || !questionId) {
+    logger.warn(
+      `processBecknExtEvent: missing session_id/question_id UUID, skipping eid=${event?.eid} type=${event?.edata?.eks?.type || ""} sid=${event?.sid || ""} qid=${event?.qid || ""}`,
+    );
+    return false;
+  }
+
+  const phase = classifyBecknNetworkPhase(event);
+  if (!phase) {
+    logger.warn(
+      `processBecknExtEvent: could not classify phase for eid=${event.eid} type=${event?.edata?.eks?.type || ""}`,
+    );
+    return false;
+  }
+  logger.debug(
+    `processBecknExtEvent: phase=${phase} session=${sessionId} question=${questionId} eid=${event?.eid} type=${event?.edata?.eks?.type || ""}`,
+  );
+
+  const target = event.edata?.eks?.target || {};
+  const nad = target.networkApiDetails || {};
+  const channel = event.channel || null;
+
+  // Isolate failures so one bad JSONB payload does not abort the whole micro-batch txn
+  await client.query("SAVEPOINT beckn_ext_evt");
+  try {
+    if (phase === "FLOW_START") {
+      await client.query(
+        `
+        INSERT INTO beckn_ext_events (
+          session_id, question_id, service_name, route_name, channel,
+          beckn_action, beckn_domain, beckn_transaction_id, beckn_message_id,
+          request_path, start_ets
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+        ON CONFLICT (session_id, question_id) DO UPDATE SET
+          service_name = COALESCE(EXCLUDED.service_name, beckn_ext_events.service_name),
+          route_name = COALESCE(EXCLUDED.route_name, beckn_ext_events.route_name),
+          channel = COALESCE(EXCLUDED.channel, beckn_ext_events.channel),
+          beckn_action = COALESCE(EXCLUDED.beckn_action, beckn_ext_events.beckn_action),
+          beckn_domain = COALESCE(EXCLUDED.beckn_domain, beckn_ext_events.beckn_domain),
+          beckn_transaction_id = COALESCE(EXCLUDED.beckn_transaction_id, beckn_ext_events.beckn_transaction_id),
+          beckn_message_id = COALESCE(EXCLUDED.beckn_message_id, beckn_ext_events.beckn_message_id),
+          request_path = COALESCE(EXCLUDED.request_path, beckn_ext_events.request_path),
+          start_ets = COALESCE(EXCLUDED.start_ets, beckn_ext_events.start_ets)
+        `,
+        [
+          sessionId,
+          questionId,
+          target.service_name || null,
+          target.route_name || null,
+          channel,
+          target.beckn_action || null,
+          target.beckn_domain || null,
+          asUuidOrNull(target.beckn_transaction_id),
+          asUuidOrNull(target.beckn_message_id),
+          target.request_path || null,
+          etsToDate(event.ets),
+        ],
+      );
+      await client.query("RELEASE SAVEPOINT beckn_ext_evt");
+      return true;
+    }
+
+    if (phase === "EXT_API") {
+      // Prefer beckn context from input when START was not seen yet
+      const inputObj = getNadInputObject(nad);
+      const beckn = inputObj.beckn || {};
+      const extReq = asJsonbParam(nad.input);
+      const extRes = asJsonbParam(nad.output);
+      await client.query(
+        `
+        INSERT INTO beckn_ext_events (
+          session_id, question_id, service_name, route_name, channel,
+          beckn_action, beckn_domain, beckn_transaction_id, beckn_message_id,
+          request_path,
+          ext_api_service, ext_api_method, ext_api_url,
+          ext_api_request, ext_api_response,
+          ext_api_status_code, ext_api_latency_ms, ext_api_success, ext_api_error
+        ) VALUES (
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+          $11,$12,$13,$14::jsonb,$15::jsonb,$16,$17,$18,$19
+        )
+        ON CONFLICT (session_id, question_id) DO UPDATE SET
+          service_name = COALESCE(beckn_ext_events.service_name, EXCLUDED.service_name),
+          route_name = COALESCE(beckn_ext_events.route_name, EXCLUDED.route_name),
+          channel = COALESCE(beckn_ext_events.channel, EXCLUDED.channel),
+          beckn_action = COALESCE(beckn_ext_events.beckn_action, EXCLUDED.beckn_action),
+          beckn_domain = COALESCE(beckn_ext_events.beckn_domain, EXCLUDED.beckn_domain),
+          beckn_transaction_id = COALESCE(beckn_ext_events.beckn_transaction_id, EXCLUDED.beckn_transaction_id),
+          beckn_message_id = COALESCE(beckn_ext_events.beckn_message_id, EXCLUDED.beckn_message_id),
+          request_path = COALESCE(beckn_ext_events.request_path, EXCLUDED.request_path),
+          ext_api_service = COALESCE(EXCLUDED.ext_api_service, beckn_ext_events.ext_api_service),
+          ext_api_method = COALESCE(EXCLUDED.ext_api_method, beckn_ext_events.ext_api_method),
+          ext_api_url = COALESCE(EXCLUDED.ext_api_url, beckn_ext_events.ext_api_url),
+          ext_api_request = COALESCE(EXCLUDED.ext_api_request, beckn_ext_events.ext_api_request),
+          ext_api_response = COALESCE(EXCLUDED.ext_api_response, beckn_ext_events.ext_api_response),
+          ext_api_status_code = COALESCE(EXCLUDED.ext_api_status_code, beckn_ext_events.ext_api_status_code),
+          ext_api_latency_ms = COALESCE(EXCLUDED.ext_api_latency_ms, beckn_ext_events.ext_api_latency_ms),
+          ext_api_success = COALESCE(EXCLUDED.ext_api_success, beckn_ext_events.ext_api_success),
+          ext_api_error = COALESCE(EXCLUDED.ext_api_error, beckn_ext_events.ext_api_error)
+        `,
+        [
+          sessionId,
+          questionId,
+          nad.service_name || target.id || null,
+          inputObj.route_name || null,
+          channel,
+          beckn.action || null,
+          beckn.domain || null,
+          asUuidOrNull(beckn.transaction_id),
+          asUuidOrNull(beckn.message_id),
+          beckn.request_path || null,
+          nad.apiService || nad.service_name || null,
+          nad.method || null,
+          nad.url || null,
+          extReq,
+          extRes,
+          asIntOrNull(nad.statusCode),
+          asIntOrNull(nad.latencyMs),
+          typeof nad.success === "boolean" ? nad.success : null,
+          asTextOrNull(nad.error),
+        ],
+      );
+      await client.query("RELEASE SAVEPOINT beckn_ext_evt");
+      return true;
+    }
+
+    if (phase === "BPP_NETWORK") {
+      const inputObj = getNadInputObject(nad);
+      const beckn = inputObj.beckn || {};
+      const bppReq = asJsonbParam(nad.input);
+      const bppRes = asJsonbParam(nad.output);
+      await client.query(
+        `
+        INSERT INTO beckn_ext_events (
+          session_id, question_id, service_name, route_name, channel,
+          beckn_action, beckn_domain, beckn_transaction_id, beckn_message_id,
+          request_path,
+          beckn_api_service, beckn_method, beckn_url,
+          beckn_request, beckn_response,
+          beckn_status_code, beckn_latency_ms, beckn_success, beckn_error
+        ) VALUES (
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+          $11,$12,$13,$14::jsonb,$15::jsonb,$16,$17,$18,$19
+        )
+        ON CONFLICT (session_id, question_id) DO UPDATE SET
+          service_name = COALESCE(beckn_ext_events.service_name, EXCLUDED.service_name),
+          route_name = COALESCE(beckn_ext_events.route_name, EXCLUDED.route_name),
+          channel = COALESCE(beckn_ext_events.channel, EXCLUDED.channel),
+          beckn_action = COALESCE(beckn_ext_events.beckn_action, EXCLUDED.beckn_action),
+          beckn_domain = COALESCE(beckn_ext_events.beckn_domain, EXCLUDED.beckn_domain),
+          beckn_transaction_id = COALESCE(beckn_ext_events.beckn_transaction_id, EXCLUDED.beckn_transaction_id),
+          beckn_message_id = COALESCE(beckn_ext_events.beckn_message_id, EXCLUDED.beckn_message_id),
+          request_path = COALESCE(beckn_ext_events.request_path, EXCLUDED.request_path),
+          beckn_api_service = COALESCE(EXCLUDED.beckn_api_service, beckn_ext_events.beckn_api_service),
+          beckn_method = COALESCE(EXCLUDED.beckn_method, beckn_ext_events.beckn_method),
+          beckn_url = COALESCE(EXCLUDED.beckn_url, beckn_ext_events.beckn_url),
+          beckn_request = COALESCE(EXCLUDED.beckn_request, beckn_ext_events.beckn_request),
+          beckn_response = COALESCE(EXCLUDED.beckn_response, beckn_ext_events.beckn_response),
+          beckn_status_code = COALESCE(EXCLUDED.beckn_status_code, beckn_ext_events.beckn_status_code),
+          beckn_latency_ms = COALESCE(EXCLUDED.beckn_latency_ms, beckn_ext_events.beckn_latency_ms),
+          beckn_success = COALESCE(EXCLUDED.beckn_success, beckn_ext_events.beckn_success),
+          beckn_error = COALESCE(EXCLUDED.beckn_error, beckn_ext_events.beckn_error)
+        `,
+        [
+          sessionId,
+          questionId,
+          nad.service_name || null,
+          inputObj.route_name || null,
+          channel,
+          beckn.action || null,
+          beckn.domain || null,
+          asUuidOrNull(beckn.transaction_id || inputObj.session_id),
+          asUuidOrNull(beckn.message_id || inputObj.question_id),
+          beckn.request_path || nad.url || null,
+          nad.apiService || null,
+          nad.method || null,
+          nad.url || null,
+          bppReq,
+          bppRes,
+          asIntOrNull(nad.statusCode),
+          asIntOrNull(nad.latencyMs),
+          typeof nad.success === "boolean" ? nad.success : null,
+          asTextOrNull(nad.error),
+        ],
+      );
+      await client.query("RELEASE SAVEPOINT beckn_ext_evt");
+      return true;
+    }
+
+    if (phase === "FLOW_END") {
+      const flowSuccess =
+        typeof target.success === "boolean"
+          ? target.success
+          : String(event.edata?.eks?.state || "").toUpperCase() === "SUCCESS"
+            ? true
+            : String(event.edata?.eks?.state || "").toUpperCase() === "FAILED"
+              ? false
+              : null;
+      const flowStatus =
+        event.edata?.eks?.state ||
+        (flowSuccess === true ? "SUCCESS" : flowSuccess === false ? "FAILED" : null);
+
+      await client.query(
+        `
+        INSERT INTO beckn_ext_events (
+          session_id, question_id, service_name, route_name, channel,
+          beckn_action, beckn_domain, beckn_transaction_id, beckn_message_id,
+          request_path, end_ets, duration_ms, flow_status, flow_success, flow_error
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+        ON CONFLICT (session_id, question_id) DO UPDATE SET
+          service_name = COALESCE(beckn_ext_events.service_name, EXCLUDED.service_name),
+          route_name = COALESCE(beckn_ext_events.route_name, EXCLUDED.route_name),
+          channel = COALESCE(beckn_ext_events.channel, EXCLUDED.channel),
+          beckn_action = COALESCE(beckn_ext_events.beckn_action, EXCLUDED.beckn_action),
+          beckn_domain = COALESCE(beckn_ext_events.beckn_domain, EXCLUDED.beckn_domain),
+          beckn_transaction_id = COALESCE(beckn_ext_events.beckn_transaction_id, EXCLUDED.beckn_transaction_id),
+          beckn_message_id = COALESCE(beckn_ext_events.beckn_message_id, EXCLUDED.beckn_message_id),
+          request_path = COALESCE(beckn_ext_events.request_path, EXCLUDED.request_path),
+          end_ets = COALESCE(EXCLUDED.end_ets, beckn_ext_events.end_ets),
+          duration_ms = COALESCE(EXCLUDED.duration_ms, beckn_ext_events.duration_ms),
+          flow_status = COALESCE(EXCLUDED.flow_status, beckn_ext_events.flow_status),
+          flow_success = COALESCE(EXCLUDED.flow_success, beckn_ext_events.flow_success),
+          flow_error = COALESCE(EXCLUDED.flow_error, beckn_ext_events.flow_error)
+        `,
+        [
+          sessionId,
+          questionId,
+          target.service_name || null,
+          target.route_name || null,
+          channel,
+          target.beckn_action || null,
+          target.beckn_domain || null,
+          asUuidOrNull(target.beckn_transaction_id),
+          asUuidOrNull(target.beckn_message_id),
+          target.request_path || null,
+          etsToDate(event.ets),
+          asIntOrNull(target.durationMs),
+          flowStatus,
+          flowSuccess,
+          asTextOrNull(target.error),
+        ],
+      );
+      await client.query("RELEASE SAVEPOINT beckn_ext_evt");
+      return true;
+    }
+
+    await client.query("RELEASE SAVEPOINT beckn_ext_evt");
+    return false;
+  } catch (err) {
+    // Roll back only this event so the micro-batch transaction stays usable
+    try {
+      await client.query("ROLLBACK TO SAVEPOINT beckn_ext_evt");
+    } catch (rbErr) {
+      logger.error(
+        `processBecknExtEvent savepoint rollback failed: ${rbErr.message}`,
+      );
+    }
+    const inputPreview = (() => {
+      try {
+        return JSON.stringify(nad.input).slice(0, 300);
+      } catch {
+        return String(nad.input).slice(0, 300);
+      }
+    })();
+    const outputPreview = (() => {
+      try {
+        return JSON.stringify(nad.output).slice(0, 300);
+      } catch {
+        return String(nad.output).slice(0, 300);
+      }
+    })();
+    logger.error(
+      `processBecknExtEvent error phase=${phase} session=${sessionId} question=${questionId}: ${err.message}; inputPreview=${inputPreview}; outputPreview=${outputPreview}`,
+    );
+    return false;
+  }
+}
+
 // Parse telemetry message JSON
 function parseTelemetryMessage(message, batchId = '', logIndex = 0) {
   try {
@@ -1505,6 +2101,9 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()} `) {
       for (let logIndex = 0; logIndex < chunk.length; logIndex++) {
         const log = chunk[logIndex];
         const events = parseTelemetryMessage(log.message, batchId, logIndex + 1);
+        // Within one winston log, EXT_API events often lack session/question tags;
+        // carry IDs from sibling FLOW_START / BPP events in the same batch.
+        let becknKeysHint = { sessionId: null, questionId: null };
 
         for (let eventIndex = 0; eventIndex < events.length; eventIndex++) {
           const event = events[eventIndex];
@@ -1515,6 +2114,30 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()} `) {
           const eventMid = event.mid || 'unknown';
 
           let eventProcessed = false;
+
+          // Beckn / external network lifecycle → beckn_ext_events (aggregated by session+question)
+          // Always continue here so network events never fall through to users/questions/etc.
+          if (isBecknExtNetworkEvent(event)) {
+            const resolved = getBecknLifecycleKeys(event);
+            if (resolved.sessionId && resolved.questionId) {
+              becknKeysHint = resolved;
+            } else if (becknKeysHint.sessionId && becknKeysHint.questionId) {
+              event._beckn_session_id = becknKeysHint.sessionId;
+              event._beckn_question_id = becknKeysHint.questionId;
+            }
+            const ok = await processBecknExtEvent(client, event);
+            if (ok) {
+              eventProcessed = true;
+              totalEventsProcessed++;
+            } else if (eventType !== "OE_END" && eventType !== "OE_START") {
+              await client.query(
+                `Insert into dead_letter_logs(level, message, meta, event_name) values($1, $2, $3, $4)`,
+                [log.level, JSON.stringify(event), log.meta, eventType]
+              );
+              totalDeadLetter++;
+            }
+            continue;
+          }
 
           // Handle voice telemetry events
           if (eventType === 'OE_VOICE_RESPONSE') {
@@ -1545,6 +2168,11 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()} `) {
 
             const hasVoiceResponse = getNestedValue(event, 'edata.eks.target.questionsDetails.responseText');
             if (processor["tableName"] === 'questions' && (hasAsrResponse || hasTtsResponse || hasVoiceResponse || hasTeleFeedback)) {
+              continue;
+            }
+
+            // Network API events are handled by processBecknExtEvent — skip legacy network_api_table
+            if (processor["tableName"] === "network_api_table") {
               continue;
             }
 
@@ -1678,6 +2306,9 @@ async function processTelemetryLogsFast(batchId = `fast_${Date.now()}`) {
 
       for (const log of chunk) {
         const events = parseTelemetryMessage(log.message, batchId, 0);
+        // Within one winston log, EXT_API events often lack session/question tags;
+        // carry IDs from sibling FLOW_START / BPP events in the same batch.
+        let becknKeysHint = { sessionId: null, questionId: null };
 
         for (let eventIndex = 0; eventIndex < events.length; eventIndex++) {
           const event = events[eventIndex];
@@ -1686,6 +2317,31 @@ async function processTelemetryLogsFast(batchId = `fast_${Date.now()}`) {
           const eventType = event.eid;
 
           let eventProcessed = false;
+
+          // Beckn / external network lifecycle → beckn_ext_events (aggregated by session+question)
+          // Always continue here so network events never fall through to users/questions/etc.
+          if (isBecknExtNetworkEvent(event)) {
+            const resolved = getBecknLifecycleKeys(event);
+            if (resolved.sessionId && resolved.questionId) {
+              becknKeysHint = resolved;
+            } else if (becknKeysHint.sessionId && becknKeysHint.questionId) {
+              event._beckn_session_id = becknKeysHint.sessionId;
+              event._beckn_question_id = becknKeysHint.questionId;
+            }
+            const ok = await processBecknExtEvent(client, event);
+            if (ok) {
+              eventProcessed = true;
+              totalEventsProcessed++;
+            } else if (eventType !== "OE_END" && eventType !== "OE_START") {
+              deadLetterRows.push({
+                level: log.level,
+                event,
+                meta: log.meta,
+                eventType,
+              });
+            }
+            continue;
+          }
 
           // Collect voice telemetry events for batched processing
           if (eventType === 'OE_VOICE_RESPONSE') {
@@ -1719,6 +2375,11 @@ async function processTelemetryLogsFast(batchId = `fast_${Date.now()}`) {
             // Skip questions processor for ASR/TTS/voice/TeleFeedback events
             const hasVoiceResponse = getNestedValue(event, 'edata.eks.target.questionsDetails.responseText');
             if (processor["tableName"] === 'questions' && (hasAsrResponse || hasTtsResponse || hasVoiceResponse || hasTeleFeedback)) {
+              continue;
+            }
+
+            // Network API events are handled by processBecknExtEvent — skip legacy network_api_table
+            if (processor["tableName"] === "network_api_table") {
               continue;
             }
 

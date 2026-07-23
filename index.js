@@ -3674,12 +3674,14 @@ async function refreshMaterializedViews() {
           CREATE MATERIALIZED VIEW IF NOT EXISTS mv_users_daily_firstseen_ist AS
           SELECT
             DATE(timezone('Asia/Kolkata', u.first_seen_at AT TIME ZONE 'UTC')) AS bucket_date,
+            COALESCE(u.channel, 'unknown') AS channel,
             COUNT(DISTINCT u.fingerprint_id) AS new_users
           FROM users u
           WHERE u.fingerprint_id IS NOT NULL
             AND u.first_seen_at IS NOT NULL
-          GROUP BY 1;
-          CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_users_daily_firstseen_ist_date ON mv_users_daily_firstseen_ist(bucket_date);
+          GROUP BY 1, 2;
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_users_daily_firstseen_ist_date_channel
+            ON mv_users_daily_firstseen_ist(bucket_date, channel);
         `
       },
       {
@@ -3688,6 +3690,7 @@ async function refreshMaterializedViews() {
           CREATE MATERIALIZED VIEW IF NOT EXISTS mv_users_daily_returning_ist AS
           SELECT
             DATE(timezone('Asia/Kolkata', to_timestamp((q.ets)::double precision / 1000.0))) AS bucket_date,
+            COALESCE(u.channel, 'unknown') AS channel,
             COUNT(DISTINCT q.fingerprint_id) AS returning_users
           FROM questions q
           JOIN users u ON q.fingerprint_id = u.fingerprint_id
@@ -3695,8 +3698,9 @@ async function refreshMaterializedViews() {
             AND q.ets IS NOT NULL
             AND DATE(timezone('Asia/Kolkata', to_timestamp((q.ets)::double precision / 1000.0)))
                 <> DATE(timezone('Asia/Kolkata', u.first_seen_at AT TIME ZONE 'UTC'))
-          GROUP BY 1;
-          CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_users_daily_returning_ist_date ON mv_users_daily_returning_ist(bucket_date);
+          GROUP BY 1, 2;
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_users_daily_returning_ist_date_channel
+            ON mv_users_daily_returning_ist(bucket_date, channel);
         `
       },
       {
@@ -3726,40 +3730,29 @@ async function refreshMaterializedViews() {
         name: 'mv_sessions_daily',
         query: `
           CREATE MATERIALIZED VIEW IF NOT EXISTS mv_sessions_daily AS
-          WITH combined AS (
-            SELECT sid, fingerprint_id AS uid, ets
-            FROM questions
-            WHERE sid IS NOT NULL AND fingerprint_id IS NOT NULL AND answertext IS NOT NULL AND ets IS NOT NULL
-            UNION ALL
-            SELECT sid, fingerprint_id AS uid, ets
-            FROM feedback
-            WHERE sid IS NOT NULL AND fingerprint_id IS NOT NULL AND ets IS NOT NULL
-            UNION ALL
-            SELECT sid, fingerprint_id AS uid, ets
-            FROM errordetails
-            WHERE sid IS NOT NULL AND fingerprint_id IS NOT NULL AND ets IS NOT NULL
-          ),
-          session_counts AS (
-            SELECT sid, uid, MIN(ets) AS first_ets, MAX(ets) AS last_ets, COUNT(*) AS event_count
-            FROM combined
-            GROUP BY sid, uid
-          ),
-          question_counts AS (
-            SELECT sid, fingerprint_id AS uid, COUNT(*) AS question_count
-            FROM questions
-            WHERE sid IS NOT NULL AND fingerprint_id IS NOT NULL AND answertext IS NOT NULL AND ets IS NOT NULL
-            GROUP BY sid, fingerprint_id
-          )
           SELECT
-            sc.sid, sc.uid, sc.first_ets, sc.last_ets, sc.event_count,
-            COALESCE(qc.question_count, 0) AS question_count,
-            DATE(timezone('Asia/Kolkata', to_timestamp((sc.first_ets)::double precision / 1000.0))) AS session_date_ist
-          FROM session_counts sc
-          LEFT JOIN question_counts qc ON qc.sid = sc.sid AND qc.uid = sc.uid;
-          CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_sessions_daily_sid_uid ON mv_sessions_daily(sid, uid);
-          CREATE INDEX IF NOT EXISTS idx_mv_sessions_daily_session_date ON mv_sessions_daily(session_date_ist);
-          CREATE INDEX IF NOT EXISTS idx_mv_sessions_daily_last_ets ON mv_sessions_daily(last_ets DESC);
-          CREATE INDEX IF NOT EXISTS idx_mv_sessions_daily_uid ON mv_sessions_daily(uid);
+            q.sid,
+            q.fingerprint_id AS uid,
+            COALESCE(q.channel, 'unknown') AS channel,
+            MIN(q.ets) AS first_ets,
+            MAX(q.ets) AS last_ets,
+            COUNT(*) AS event_count,
+            COUNT(*) AS question_count,
+            DATE(timezone('Asia/Kolkata', to_timestamp((MIN(q.ets))::double precision / 1000.0))) AS session_date_ist
+          FROM questions q
+          WHERE q.sid IS NOT NULL
+            AND q.fingerprint_id IS NOT NULL
+            AND q.answertext IS NOT NULL
+            AND q.ets IS NOT NULL
+          GROUP BY q.sid, q.fingerprint_id, COALESCE(q.channel, 'unknown');
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_sessions_daily_channel_sid_uid
+            ON mv_sessions_daily(channel, sid, uid);
+          CREATE INDEX IF NOT EXISTS idx_mv_sessions_daily_channel_session_date
+            ON mv_sessions_daily(channel, session_date_ist);
+          CREATE INDEX IF NOT EXISTS idx_mv_sessions_daily_channel_last_ets
+            ON mv_sessions_daily(channel, last_ets DESC);
+          CREATE INDEX IF NOT EXISTS idx_mv_sessions_daily_channel_uid
+            ON mv_sessions_daily(channel, uid);
         `
       },
       {

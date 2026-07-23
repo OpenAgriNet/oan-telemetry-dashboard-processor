@@ -645,6 +645,11 @@ async function ensureTablesExist() {
         event_time TIMESTAMPTZ,
         metadata JSONB DEFAULT '{}'::jsonb,
         notification_id VARCHAR,
+        notification_description TEXT,
+        message_type VARCHAR(100),
+        category_type VARCHAR(100),
+        latitude DOUBLE PRECISION,
+        longitude DOUBLE PRECISION,
         action VARCHAR,
         reason VARCHAR,
         feedback TEXT,
@@ -654,6 +659,15 @@ async function ensureTablesExist() {
         response_count INTEGER,
         created_at TIMESTAMP DEFAULT NOW()
       )
+    `);
+
+    await client.query(`
+      ALTER TABLE public.ui_interaction_events
+        ADD COLUMN IF NOT EXISTS notification_description TEXT,
+        ADD COLUMN IF NOT EXISTS message_type VARCHAR(100),
+        ADD COLUMN IF NOT EXISTS category_type VARCHAR(100),
+        ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION,
+        ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION
     `);
 
     // Create event_processors table if not exists
@@ -1065,6 +1079,11 @@ VALUES
     "event_time": "edata.eks.clientTime",
     "metadata": "edata.eks.metadata",
     "notification_id": "edata.eks.metadata.notification_id",
+    "notification_description": "edata.eks.metadata.notification_description",
+    "message_type": "edata.eks.metadata.message_type",
+    "category_type": "edata.eks.metadata.category_type",
+    "latitude": "edata.eks.metadata.latitude",
+    "longitude": "edata.eks.metadata.longitude",
     "action": "edata.eks.metadata.action",
     "reason": "edata.eks.metadata.reason",
     "feedback": "edata.eks.metadata.feedback",
@@ -1093,6 +1112,11 @@ event_type = 'OE_INTERACT',
     "event_time": "edata.eks.clientTime",
     "metadata": "edata.eks.metadata",
     "notification_id": "edata.eks.metadata.notification_id",
+    "notification_description": "edata.eks.metadata.notification_description",
+    "message_type": "edata.eks.metadata.message_type",
+    "category_type": "edata.eks.metadata.category_type",
+    "latitude": "edata.eks.metadata.latitude",
+    "longitude": "edata.eks.metadata.longitude",
     "action": "edata.eks.metadata.action",
     "reason": "edata.eks.metadata.reason",
     "feedback": "edata.eks.metadata.feedback",

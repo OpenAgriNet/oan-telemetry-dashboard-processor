@@ -20,6 +20,12 @@ const {
   loadEventProcessors,
   getNestedValue,
 } = require("./eventProcessors");
+const {
+  ensureExternalFlowSchema,
+  isExternalFlowEvent,
+  processExternalFlowEvent,
+} = require("./externalFlowProcessor");
+const { redactSensitiveData } = require("./externalFlowPii");
 const { forEach } = require("lodash");
 
 let isShuttingDown = false;
@@ -154,6 +160,9 @@ const MV_REFRESH_SCHEDULE = process.env.MV_REFRESH_SCHEDULE || "*/15 * * * *"; /
 async function ensureTablesExist() {
   const client = await pool.connect();
   try {
+    // External-flow tables are isolated from existing question/feedback/error processing.
+    await ensureExternalFlowSchema(client);
+
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.dead_letter_logs (
         level character varying COLLATE pg_catalog."default",
@@ -631,7 +640,7 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
     );
     const queryStartTime = Date.now();
     const result = await client.query(
-      `SELECT id, level, message, meta, cast(to_char(("timestamp")::TIMESTAMP,'yyyymmddhhmiss') as BigInt) as timestamp, sync_status FROM winston_logs 
+      `SELECT id, level, message, meta, "timestamp" AS stored_at, cast(to_char(("timestamp")::TIMESTAMP,'yyyymmddhhmiss') as BigInt) as timestamp, sync_status FROM winston_logs
        WHERE sync_status = 0 
        ORDER BY "timestamp" ASC 
        LIMIT $1`,
@@ -677,7 +686,8 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
       for (let eventIndex = 0; eventIndex < events.length; eventIndex++) {
         const event = events[eventIndex];
         const eventType = event.eid;
-        const eventUid = event.uid || "unknown";
+        const isExternalEvent = isExternalFlowEvent(event);
+        const eventUid = isExternalEvent ? "[redacted]" : event.uid || "unknown";
         const eventMid = event.mid || "unknown";
         logger.debug(
           `[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}/${events.length}] Processing event type: ${eventType}, uid: ${eventUid}, mid: ${eventMid}`,
@@ -685,6 +695,40 @@ async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
 
         let eventProcessed = false;
         let matchedProcessor = null;
+
+        // External API telemetry has its own normalized model and must not be
+        // interpreted by the generic, eid-only event processor mappings.
+        if (isExternalEvent) {
+          const processorStartTime = Date.now();
+          const externalResult = await processExternalFlowEvent(client, event, {
+            rawLogId: log.id,
+            rawEventIndex: eventIndex + 1,
+            storedAt: log.stored_at,
+          });
+
+          if (externalResult.processed) {
+            totalEventsProcessed++;
+            logger.info(
+              `[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] mid: ${eventMid} - External flow processor completed in ${Date.now() - processorStartTime}ms`,
+            );
+          } else {
+            await client.query(
+              `INSERT INTO dead_letter_logs(level, message, meta, event_name)
+               VALUES ($1, $2, $3, $4)`,
+              [
+                log.level,
+                JSON.stringify(redactSensitiveData(event)),
+                redactSensitiveData(log.meta),
+                eventType,
+              ],
+            );
+            deadLetterCount++;
+            logger.warn(
+              `[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] mid: ${eventMid} - External flow event was dead-lettered: ${externalResult.reason}`,
+            );
+          }
+          continue;
+        }
 
         for (const key in eventProcessors) {
           const processor = eventProcessors[key];
@@ -1473,6 +1517,7 @@ async function shutdown(reason) {
 // Export for testing
 module.exports = {
   app,
+  pool,
   startServer,
   processTelemetryLogs,
   ensureTablesExist,
@@ -1483,5 +1528,3 @@ module.exports = {
 if (require.main === module) {
   startServer();
 }
-
-module.exports = { app, pool };

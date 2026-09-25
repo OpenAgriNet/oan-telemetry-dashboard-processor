@@ -3,6 +3,7 @@
 
 CREATE TABLE IF NOT EXISTS public.external_api_traces (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  trace_type TEXT NOT NULL DEFAULT 'unlinked',
   question_id TEXT,
   session_id TEXT,
   transaction_id TEXT,
@@ -67,10 +68,15 @@ CREATE TABLE IF NOT EXISTS public.external_api_events (
   first_audio_ms BIGINT,
   total_ms BIGINT,
   tool_calls JSONB,
-  raw_event JSONB NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE public.external_api_traces
+  ADD COLUMN IF NOT EXISTS trace_type TEXT NOT NULL DEFAULT 'unlinked';
+
+ALTER TABLE public.external_api_events
+  DROP COLUMN IF EXISTS raw_event;
 
 CREATE INDEX IF NOT EXISTS idx_external_api_events_trace_id ON public.external_api_events(trace_id);
 CREATE INDEX IF NOT EXISTS idx_external_api_events_event_time ON public.external_api_events(event_time);

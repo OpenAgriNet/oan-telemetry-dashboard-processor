@@ -96,14 +96,19 @@ function normalizeExternalFlowEvent(event, source = {}) {
     firstAudioMs: toInteger(firstValue(eks.firstAudioMs, target.firstAudioMs)),
     totalMs: toInteger(firstValue(eks.totalMs, target.totalMs)),
     toolCalls: toJsonbValue(firstValue(eks.toolCalls, target.toolCalls)),
-    rawEvent: redactSensitiveData(event),
   };
+}
+
+function sessionQuestionAliasValue(record) {
+  if (!record.sessionId || !record.questionId) return null;
+  // JSON encoding prevents separator collisions while keeping a stable
+  // correlation value for the same session/question pair.
+  return JSON.stringify([record.sessionId, record.questionId]);
 }
 
 function correlationAliases(record) {
   return [
-    ["question_id", record.questionId],
-    ["session_id", record.sessionId],
+    ["session_question", sessionQuestionAliasValue(record)],
     ["transaction_id", record.transactionId],
     ["message_id", record.messageId],
     ["http_call_id", record.httpCallId],
@@ -111,10 +116,19 @@ function correlationAliases(record) {
   ].filter(([, value]) => value);
 }
 
+function traceTypeForRecord(record) {
+  if (sessionQuestionAliasValue(record)) return "chat_question";
+  if (record.transactionId) return "beckn_transaction";
+  if (record.httpCallId) return "direct_http";
+  if (record.dependencyOperationId) return "dependency_only";
+  return "unlinked";
+}
+
 async function ensureExternalFlowSchema(client) {
   await client.query(`
     CREATE TABLE IF NOT EXISTS public.external_api_traces (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      trace_type TEXT NOT NULL DEFAULT 'unlinked',
       question_id TEXT,
       session_id TEXT,
       transaction_id TEXT,
@@ -181,11 +195,16 @@ async function ensureExternalFlowSchema(client) {
       first_audio_ms BIGINT,
       total_ms BIGINT,
       tool_calls JSONB,
-      raw_event JSONB NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+  // This feature has not been deployed yet, but these guards make local or
+  // interrupted development runs converge on the same no-raw-event schema.
+  await client.query(
+    "ALTER TABLE public.external_api_traces ADD COLUMN IF NOT EXISTS trace_type TEXT NOT NULL DEFAULT 'unlinked'",
+  );
+  await client.query("ALTER TABLE public.external_api_events DROP COLUMN IF EXISTS raw_event");
   await client.query("CREATE INDEX IF NOT EXISTS idx_external_api_events_trace_id ON public.external_api_events(trace_id)");
   await client.query("CREATE INDEX IF NOT EXISTS idx_external_api_events_event_time ON public.external_api_events(event_time)");
   await client.query("CREATE INDEX IF NOT EXISTS idx_external_api_events_transaction_id ON public.external_api_events(transaction_id)");
@@ -194,25 +213,56 @@ async function ensureExternalFlowSchema(client) {
 
 async function resolveTrace(client, record) {
   const aliases = correlationAliases(record);
-  const values = aliases.map(([, value]) => value);
-  let traceIds = [];
+  let matches = [];
 
-  if (values.length) {
+  if (aliases.length) {
     const result = await client.query(
-      "SELECT DISTINCT trace_id FROM public.external_api_trace_aliases WHERE identifier_value = ANY($1::text[])",
-      [values],
+      `SELECT DISTINCT existing.trace_id, existing.identifier_type, existing.identifier_value
+       FROM public.external_api_trace_aliases AS existing
+       JOIN jsonb_to_recordset($1::jsonb) AS incoming(identifier_type TEXT, identifier_value TEXT)
+         ON existing.identifier_type = incoming.identifier_type
+        AND existing.identifier_value = incoming.identifier_value`,
+      [
+        JSON.stringify(
+          aliases.map(([identifierType, identifierValue]) => ({
+            identifier_type: identifierType,
+            identifier_value: identifierValue,
+          })),
+        ),
+      ],
     );
-    traceIds = result.rows.map((row) => row.trace_id);
+    matches = result.rows;
   }
 
-  let traceId = traceIds[0];
+  // An explicit session/question pair is the strongest chatbot identity.
+  // Session IDs alone are intentionally never aliases: one session can carry
+  // multiple questions. Direct/Postman traffic falls back to transaction,
+  // message, HTTP, and dependency identifiers in the declared order.
+  let traceId;
+  for (const [identifierType, identifierValue] of aliases) {
+    const match = matches.find(
+      (row) => row.identifier_type === identifierType && row.identifier_value === identifierValue,
+    );
+    if (match) {
+      traceId = match.trace_id;
+      break;
+    }
+  }
+
+  const traceIds = [...new Set(matches.map((row) => row.trace_id))];
   if (!traceId) {
-    const created = await client.query("INSERT INTO public.external_api_traces DEFAULT VALUES RETURNING id");
+    const created = await client.query(
+      "INSERT INTO public.external_api_traces (trace_type) VALUES ($1) RETURNING id",
+      [traceTypeForRecord(record)],
+    );
     traceId = created.rows[0].id;
   }
 
-  for (const otherTraceId of traceIds.slice(1)) {
-    if (otherTraceId === traceId) continue;
+  // `traceId` is chosen by correlation priority, not by database row order.
+  // Merge every *other* matched trace. Using `slice(1)` here could leave the
+  // first returned trace unmerged when the preferred trace appeared later in
+  // PostgreSQL's unordered result set.
+  for (const otherTraceId of traceIds.filter((candidateTraceId) => candidateTraceId !== traceId)) {
     await client.query("UPDATE public.external_api_events SET trace_id = $1 WHERE trace_id = $2", [traceId, otherTraceId]);
     const otherAliases = await client.query(
       "SELECT identifier_type, identifier_value FROM public.external_api_trace_aliases WHERE trace_id = $1",
@@ -245,9 +295,26 @@ async function resolveTrace(client, record) {
          session_id = COALESCE(session_id, $3),
          transaction_id = COALESCE(transaction_id, $4),
          message_id = COALESCE(message_id, $5),
+         trace_type = CASE
+           WHEN $6 = 'chat_question' THEN 'chat_question'
+           WHEN trace_type = 'chat_question' THEN trace_type
+           WHEN $6 = 'beckn_transaction' THEN 'beckn_transaction'
+           WHEN trace_type = 'beckn_transaction' THEN trace_type
+           WHEN $6 = 'direct_http' THEN 'direct_http'
+           WHEN trace_type = 'direct_http' THEN trace_type
+           WHEN $6 = 'dependency_only' THEN 'dependency_only'
+           ELSE trace_type
+         END,
          updated_at = NOW()
      WHERE id = $1`,
-    [traceId, record.questionId, record.sessionId, record.transactionId, record.messageId],
+    [
+      traceId,
+      record.questionId,
+      record.sessionId,
+      record.transactionId,
+      record.messageId,
+      traceTypeForRecord(record),
+    ],
   );
   return traceId;
 }
@@ -262,9 +329,8 @@ async function refreshTraceSummary(client, traceId) {
   );
   const rows = result.rows;
   const failures = rows.filter((row) => row.outcome === "failure");
-  const partial = rows.some((row) => row.outcome === "partial");
-  const successful = rows.some((row) => row.outcome === "success");
-  const outcome = failures.length ? "failure" : partial ? "partial" : successful ? "success" : "incomplete";
+  const reportedOutcomes = rows.filter((row) => row.outcome);
+  const outcome = reportedOutcomes[reportedOutcomes.length - 1]?.outcome || "incomplete";
   const stages = {};
   for (const row of rows) {
     const key = row.event_name || row.stage || row.layer || "unknown";
@@ -299,6 +365,18 @@ async function processExternalFlowEvent(client, event, source) {
     return { processed: false, reason: "missing event mid" };
   }
 
+  // Winston rows can be retried after an interrupted batch. An event MID is
+  // immutable and unique, so preserve its already-resolved trace rather than
+  // resolving it again (which could create an orphan trace for an unlinked
+  // event or move the event to a different trace).
+  const existingEvent = await client.query(
+    "SELECT trace_id FROM public.external_api_events WHERE event_mid = $1",
+    [record.eventMid],
+  );
+  if (existingEvent.rows[0]?.trace_id) {
+    return { processed: true, traceId: existingEvent.rows[0].trace_id, duplicate: true };
+  }
+
   await client.query("SAVEPOINT external_flow_event");
   try {
     const traceId = await resolveTrace(client, record);
@@ -312,7 +390,6 @@ async function processExternalFlowEvent(client, event, source) {
       JSON.stringify(record.requestPayload), JSON.stringify(record.responsePayload), record.requestPayloadBytes,
       record.responsePayloadBytes, Boolean(record.responsePayloadTruncated), record.firstTokenMs,
       record.firstVisibleMs, record.firstAudioMs, record.totalMs, JSON.stringify(record.toolCalls),
-      JSON.stringify(record.rawEvent),
     ];
     await client.query(
       `INSERT INTO public.external_api_events (
@@ -322,15 +399,14 @@ async function processExternalFlowEvent(client, event, source) {
         error_payload, event_time, request_started_at, response_received_at, duration_ms, stored_at,
         request_payload, response_payload, request_payload_bytes, response_payload_bytes,
         response_payload_truncated, first_token_ms, first_visible_ms, first_audio_ms, total_ms,
-        tool_calls, raw_event
+        tool_calls
       ) VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,
-        $25::jsonb,$26,$27,$28,$29,$30,$31::jsonb,$32::jsonb,$33,$34,$35,$36,$37,$38,$39,$40::jsonb,$41::jsonb
+        $25::jsonb,$26,$27,$28,$29,$30,$31::jsonb,$32::jsonb,$33,$34,$35,$36,$37,$38,$39,$40::jsonb
       ) ON CONFLICT (event_mid) DO UPDATE SET
         trace_id = EXCLUDED.trace_id,
         raw_log_id = EXCLUDED.raw_log_id,
         raw_event_index = EXCLUDED.raw_event_index,
-        raw_event = EXCLUDED.raw_event,
         updated_at = NOW()`,
       values,
     );

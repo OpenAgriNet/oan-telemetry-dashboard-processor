@@ -42,6 +42,7 @@ describe("external-flow detection and normalization", () => {
     expect(record.httpCallId).toBe(event.edata.eks.http_call_id);
     expect(record.requestPayload.latitude).toBe(event.edata.eks.request_payload.latitude);
     expect(record.requestPayload.longitude).toBe(event.edata.eks.request_payload.longitude);
+    expect(record.rawEvent).toBeUndefined();
   });
 
   test("redacts a real farmer identifier from the verified failure fixture", () => {
@@ -161,5 +162,99 @@ describe("external-flow PII redaction", () => {
     expect(boundValues).not.toContain("MH123456789");
     expect(boundValues).not.toContain("farmer@example.com");
     expect(boundValues).not.toContain("secret-value");
+  });
+
+  test("merges every matching trace even when the preferred alias is not the first database result", async () => {
+    const chatTraceId = "00000000-0000-4000-8000-000000000001";
+    const transactionTraceId = "00000000-0000-4000-8000-000000000002";
+    const client = {
+      query: jest.fn(async (sql) => {
+        if (sql.includes("SELECT DISTINCT existing.trace_id")) {
+          // PostgreSQL does not guarantee this result order. The session/question
+          // alias is the preferred parent, even though it appears second here.
+          return {
+            rows: [
+              {
+                trace_id: transactionTraceId,
+                identifier_type: "transaction_id",
+                identifier_value: "transaction-1",
+              },
+              {
+                trace_id: chatTraceId,
+                identifier_type: "session_question",
+                identifier_value: JSON.stringify(["session-1", "question-1"]),
+              },
+            ],
+          };
+        }
+        if (sql.includes("SELECT identifier_type, identifier_value")) {
+          return { rows: [{ identifier_type: "transaction_id", identifier_value: "transaction-1" }] };
+        }
+        if (sql.includes("SELECT event_name")) return { rows: [] };
+        return { rows: [] };
+      }),
+    };
+    const event = {
+      eid: "OE_CHATBOT_ROUND_TRIP",
+      mid: "event-mid-that-joins-traces",
+      edata: {
+        eks: {
+          trace_scope: "beckn_external_api",
+          question_id: "question-1",
+          session_id: "session-1",
+          transaction_id: "transaction-1",
+        },
+      },
+    };
+
+    const result = await processExternalFlowEvent(client, event);
+    const movedEvents = client.query.mock.calls.find(
+      ([sql, values]) =>
+        sql.includes("UPDATE public.external_api_events SET trace_id") &&
+        values[0] === chatTraceId &&
+        values[1] === transactionTraceId,
+    );
+    const deletedTrace = client.query.mock.calls.find(
+      ([sql, values]) =>
+        sql.includes("DELETE FROM public.external_api_traces") && values[0] === transactionTraceId,
+    );
+
+    expect(result).toEqual({ processed: true, traceId: chatTraceId });
+    expect(movedEvents).toBeDefined();
+    expect(deletedTrace).toBeDefined();
+  });
+
+  test("keeps a retried event on its original trace without creating a new trace", async () => {
+    const originalTraceId = "00000000-0000-4000-8000-000000000003";
+    const client = {
+      query: jest.fn(async (sql) => {
+        if (sql.includes("SELECT trace_id FROM public.external_api_events")) {
+          return { rows: [{ trace_id: originalTraceId }] };
+        }
+        return { rows: [] };
+      }),
+    };
+    const event = {
+      eid: "OE_PROVIDER_DEPENDENCY_CALL",
+      mid: "already-processed-event-mid",
+      edata: { eks: { trace_scope: "beckn_external_api" } },
+    };
+
+    const result = await processExternalFlowEvent(client, event);
+
+    expect(result).toEqual({ processed: true, traceId: originalTraceId, duplicate: true });
+    expect(client.query.mock.calls.some(([sql]) => sql.includes("INSERT INTO public.external_api_traces"))).toBe(false);
+    expect(client.query.mock.calls.some(([sql]) => sql.includes("INSERT INTO public.external_api_events"))).toBe(false);
+  });
+
+  test("rejects an external event without a telemetry MID", async () => {
+    const client = { query: jest.fn() };
+    const result = await processExternalFlowEvent(client, {
+      eid: "OE_PROVIDER_DEPENDENCY_CALL",
+      edata: { eks: { trace_scope: "beckn_external_api" } },
+    });
+
+    expect(result).toEqual({ processed: false, reason: "missing event mid" });
+    expect(client.query).not.toHaveBeenCalled();
   });
 });

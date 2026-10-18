@@ -12,6 +12,7 @@ const express = require("express");
 const { Pool } = require("pg");
 const cron = require("node-cron");
 const dotenv = require("dotenv");
+dotenv.config();
 const logger = require("./logger");
 const { spawn } = require("child_process");
 
@@ -27,10 +28,12 @@ const {
 } = require("./externalFlowProcessor");
 const { redactSensitiveData } = require("./externalFlowPii");
 const { forEach } = require("lodash");
+const { requireManagementAuth } = require('./managementAuth');
 
 let isShuttingDown = false;
 let server; // HTTP server reference
 
+if (require.main === module) {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
@@ -43,13 +46,12 @@ process.on('unhandledRejection', (reason) => {
   logger.error('[FATAL] Unhandled Promise Rejection', reason);
   process.exit(1); // immediate
 });
-
-// Load environment variables from .env file
-dotenv.config();
+}
 
 // Create Express application
 const app = express();
 app.use(express.json());
+app.use('/api', requireManagementAuth);
 
 const pool = new Pool({
   user: process.env.DB_USER,
@@ -749,7 +751,7 @@ let isProcessingLogs = false;
 let currentBatchId = null;
 
 // Schedule telemetry processing with configurable cron schedule
-cron.schedule(CRON_SCHEDULE, async () => {
+if (require.main === module) cron.schedule(CRON_SCHEDULE, async () => {
   if (isShuttingDown) {
     logger.warn('[CRON] Skipping run — application shutting down');
     return;
@@ -776,6 +778,10 @@ cron.schedule(CRON_SCHEDULE, async () => {
 
   try {
     const result = await processTelemetryLogs(batchId);
+    if (result.status !== 'success') {
+      logger.error(`[${batchId}] Scheduled batch was not committed (code=${result.errorCode})`);
+      return;
+    }
     const duration = Date.now() - cronStartTime;
     logger.info(`[${batchId}] ========== CRON JOB COMPLETED ==========`);
     logger.info(
@@ -810,6 +816,7 @@ app.post("/api/process-logs", async (req, res) => {
   logger.info(`[${batchId}] Manual trigger received via API`);
   try {
     const result = await processTelemetryLogs(batchId);
+    if (result.status !== 'success') return res.status(500).json(result);
     logger.info(`[${batchId}] Manual trigger completed successfully`);
     res.status(200).json({
       message: "Telemetry log processing triggered successfully",
@@ -831,8 +838,9 @@ app.post("/api/process-logs", async (req, res) => {
 
 // API endpoint to get configured event processors
 app.get("/api/event-processors", (req, res) => {
-  const processors = Object.keys(eventProcessors).map((eventType) => ({
-    eventType,
+  const processors = eventProcessors.filter(Boolean).map((processor) => ({
+    eventType: processor.eventType,
+    tableName: processor.tableName,
     isActive: true,
   }));
 
@@ -847,7 +855,7 @@ app.post("/api/event-processors", async (req, res) => {
     if (!eventType || !tableName || !fieldMappings || !fieldVerification) {
       return res.status(400).json({
         error:
-          "Missing required parameters: eventType, tableName, and fieldMappings are required",
+          "Missing required parameters: eventType, tableName, fieldMappings and fieldVerification are required",
       });
     }
 
@@ -856,6 +864,8 @@ app.post("/api/event-processors", async (req, res) => {
       eventType,
       tableName,
       fieldMappings,
+      fieldVerification,
+      pool,
     );
 
     res.status(201).json({
@@ -865,10 +875,9 @@ app.post("/api/event-processors", async (req, res) => {
       ...result,
     });
   } catch (err) {
-    logger.error("Error registering event processor:", err);
-    res.status(500).json({
-      error: "Failed to register event processor",
-      details: err.message,
+    logger.error(`Error registering event processor (code=${err.code || 'PROCESSING_ERROR'})`);
+    res.status(err.status || 500).json({
+      error: err.status ? err.message : 'Failed to register event processor',
     });
   }
 });
@@ -988,7 +997,7 @@ async function refreshLeaderboardAggregation() {
 }
 
 // Schedule leaderboard refresh job to run at 1 AM daily
-cron.schedule(LEADERBOARD_REFRESH_SCHEDULE, async () => {
+if (require.main === module) cron.schedule(LEADERBOARD_REFRESH_SCHEDULE, async () => {
   logger.info(
     `Running scheduled leaderboard refresh (${LEADERBOARD_REFRESH_SCHEDULE})`,
   );
@@ -1095,7 +1104,7 @@ async function refreshMaterializedViews() {
 }
 
 // Schedule materialized view refresh every 15 minutes
-cron.schedule(MV_REFRESH_SCHEDULE, async () => {
+if (require.main === module) cron.schedule(MV_REFRESH_SCHEDULE, async () => {
   if (isShuttingDown) {
     logger.warn('[MV_REFRESH] Skipping run — application shutting down');
     return;

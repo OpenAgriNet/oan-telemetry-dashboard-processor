@@ -86,6 +86,22 @@ describe('durable telemetry batch outcomes', () => {
     expect(parseTelemetryMessage('{"events":[]}')).toEqual([]);
   });
 
+  test('failure records keep source references without copying private event or metadata content', async () => {
+    const input = raw([event({ eid: 'UNKNOWN', privateName: 'SYNTHETIC_PRIVATE_NAME' })]);
+    input.meta = { arbitraryPrivateField: 'SYNTHETIC_PRIVATE_META' };
+    const test = harness([input]);await test.run();
+    const failure = test.client.query.mock.calls.find(([sql]) => sql.startsWith('INSERT INTO dead_letter_logs'))[1];
+    expect(JSON.stringify(failure)).not.toContain('SYNTHETIC_PRIVATE');
+    expect(failure[2].raw_log_id).toBe('raw-1');
+  });
+
+  test('external infrastructure failures also leave the delivery pending', async () => {
+    const test = harness([raw([event({ external: true })])], {
+      processExternalFlowEvent: jest.fn().mockResolvedValue({ processed: false, errorCode: '42P01' }),
+    });
+    expect(await test.run()).toMatchObject({ status: 'error', processed: 0, deadLetterCount: 0 });
+  });
+
   test('an invalid array member does not block the following valid event', async () => {
     const result = await harness([raw([null, event()])]).run();
     expect(result).toMatchObject({ status: 'success', eventsSeen: 2, eventsProcessed: 1, deadLetterEvents: 1 });

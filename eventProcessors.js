@@ -6,6 +6,7 @@
 
 const logger = require('./logger');
 const _ = require('lodash');
+const { quoteIdentifier, validateRegistration } = require('./processorConfig');
 
 // Event processor registry
 let eventProcessors = [];
@@ -34,7 +35,7 @@ async function loadFromDatabase(pool) {
     );
 
     // Clear existing processors
-    Object.keys(eventProcessors).forEach(key => delete eventProcessors[key]);
+    eventProcessors.length = 0;
     //eventProcessors = [];
     // Register each processor from database
     for (const row of result.rows) {
@@ -63,27 +64,35 @@ async function loadFromDatabase(pool) {
  * @returns {Object} - Result of the registration
  */
 async function registerEventProcessor(eventType, tableName, fieldMappings, fieldVerification, pool) {
+  tableName = validateRegistration(eventType, tableName, fieldMappings, fieldVerification);
   const client = await pool.connect();
   try {
+    await client.query('BEGIN');
+    const existing = await client.query('SELECT id,table_name FROM event_processors WHERE LOWER(table_name)=$1 FOR UPDATE', [tableName]);
+    if (existing.rows.length > 1) throw Object.assign(new Error('More than one rule targets this table'), { status: 409 });
+    const storedTableName = existing.rows[0]?.table_name || tableName;
     // Check if the target table exists and create it if not
     await ensureTableExists(client, tableName, fieldMappings);
 
     // Insert or update event processor configuration
-    await client.query(
+    const saved = await client.query(
       `INSERT INTO event_processors (event_type, table_name, field_mappings, field_verification)
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (table_name)
-       DO UPDATE SET event_type = $1, field_mappings = $3, field_verification = $4, updated_at = NOW()`,
-      [eventType, tableName, JSON.stringify(fieldMappings), fieldVerification]
+       DO UPDATE SET event_type = $1, field_mappings = $3, field_verification = $4, updated_at = NOW()
+       RETURNING id`,
+      [eventType, storedTableName, JSON.stringify(fieldMappings), fieldVerification]
     );
 
-    // Register the processor in memory
-    registerProcessor(null, eventType, tableName, fieldMappings, fieldVerification);
+    await client.query('COMMIT');
+    // Register in memory only after the database transaction has committed.
+    registerProcessor(saved.rows[0].id, eventType, storedTableName, fieldMappings, fieldVerification);
 
     logger.info(`Registered event processor for event type: ${eventType}`);
     return { success: true };
   } catch (err) {
-    logger.error(`Error registering event processor for ${eventType}:`, err);
+    await client.query('ROLLBACK').catch(() => {});
+    logger.error(`Error registering event processor (code=${err.code || 'PROCESSING_ERROR'})`);
     throw err;
   } finally {
     client.release();
@@ -112,7 +121,7 @@ async function ensureTableExists(client, tableName, fieldMappings) {
     if (!tableExists.rows[0].exists) {
       // Construct create table SQL
       let createTableSQL = `
-        CREATE TABLE IF NOT EXISTS public.${tableName} (
+        CREATE TABLE IF NOT EXISTS public.${quoteIdentifier(tableName)} (
           id SERIAL PRIMARY KEY,
       `;
 
@@ -126,7 +135,7 @@ async function ensureTableExists(client, tableName, fieldMappings) {
         if (field.toLowerCase().includes('text') && field !== 'answerText') columnType = 'TEXT';
         if (field.toLowerCase() === 'answertext') columnType = 'JSONB';
 
-        createTableSQL += `${field.toLowerCase()} ${columnType},\n`;
+        createTableSQL += `${quoteIdentifier(field)} ${columnType},\n`;
       });
 
       // Add created_at timestamp
@@ -179,7 +188,7 @@ function registerProcessor(id, eventType, tableName, fieldMappings, fieldVerific
       }
 
       Object.entries(fieldMappings).forEach(([field, path]) => {
-        fields.push(field.toLowerCase());
+        fields.push(quoteIdentifier(field));
         let value = resolveValueForField(field.toLowerCase(), path);
 
         // Handle telemetry context fields that are not in individual events
@@ -222,7 +231,7 @@ function registerProcessor(id, eventType, tableName, fieldMappings, fieldVerific
 
       // Construct the SQL query
       const query = `
-        INSERT INTO ${tableName} (${fields.join(', ')})
+        INSERT INTO ${quoteIdentifier(tableName)} (${fields.join(', ')})
         VALUES (${placeholders.join(', ')})
       `;
 
@@ -238,7 +247,9 @@ function registerProcessor(id, eventType, tableName, fieldMappings, fieldVerific
       throw err;
     }
   };
-  eventProcessors.push(eventProcessorsData);
+  const existing = eventProcessors.findIndex(item => item && item.tableName.toLowerCase() === tableName.toLowerCase());
+  if (existing < 0) eventProcessors.push(eventProcessorsData);
+  else eventProcessors[existing] = eventProcessorsData;
 }
 
 module.exports = {

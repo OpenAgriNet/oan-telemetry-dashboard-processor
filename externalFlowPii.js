@@ -25,6 +25,11 @@ const DIRECT_FIELD_MARKERS = new Map([
   ["farmernumber", REDACTED.FARMER_ID],
   ["userid", REDACTED.PII],
   ["useridentifier", REDACTED.PII],
+  ["username", REDACTED.PII],
+  ["fullname", REDACTED.PII],
+  ["firstname", REDACTED.PII],
+  ["lastname", REDACTED.PII],
+  ["farmername", REDACTED.PII],
   ["uid", REDACTED.PII],
   ["uniqueid", REDACTED.PII],
   ["aadhaar", REDACTED.AADHAAR],
@@ -100,6 +105,34 @@ function looksLikeJson(text) {
   return trimmed.startsWith("{") || trimmed.startsWith("[");
 }
 
+function redactEndpoint(value) {
+  if (typeof value !== 'string' || !value) return value;
+  try {
+    const absolute = /^[a-z][a-z\d+.-]*:\/\//i.test(value);
+    const url = new URL(value, 'https://telemetry.invalid');
+    let changed = false;
+    if (url.username || url.password) {
+      url.username = REDACTED.TOKEN;
+      url.password = '';
+      changed = true;
+    }
+    const query = new URLSearchParams();
+    for (const [key, original] of url.searchParams) {
+      const masked = redactSensitiveData(original, key);
+      query.append(key, masked);
+      if (masked !== original) changed = true;
+    }
+    if (!changed && redactText(url.hash) === url.hash) return value;
+    url.search = query.toString();
+    url.hash = redactText(url.hash);
+    return absolute ? url.toString() : `${url.pathname}${url.search}${url.hash}`;
+  } catch (_) {
+    // An invalid address must not bypass masking of query credentials.
+    const query = value.indexOf('?');
+    return query < 0 ? redactText(value) : `${redactText(value.slice(0, query))}?[REDACTED_QUERY]`;
+  }
+}
+
 /**
  * Deeply redacts an object without changing correlation identifiers, GPS, or
  * location fields. JSON encoded in string fields is parsed and re-serialized.
@@ -142,4 +175,5 @@ module.exports = {
   REDACTED,
   redactText,
   redactSensitiveData,
+  redactEndpoint,
 };

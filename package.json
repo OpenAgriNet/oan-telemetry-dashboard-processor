@@ -8,6 +8,7 @@
     "dev": "nodemon index.js",
     "test": "jest --coverage",
     "test:local-db": "node __test__/local-batch.integration.cjs",
+    "test:management-api": "node __test__/management-api.integration.cjs",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix"
   },

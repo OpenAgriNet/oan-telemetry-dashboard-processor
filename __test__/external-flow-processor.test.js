@@ -6,7 +6,7 @@ const {
 } = require("../externalFlowProcessor");
 const { redactSensitiveData } = require("../externalFlowPii");
 
-const fixture = require("../../gist-telemetry/mh_full_telemetry_export.json");
+const fixture = require("./fixtures/external-flow.json");
 
 function fixtureEvents(example) {
   return example.captured_winston_logs.flatMap((row) =>
@@ -45,7 +45,7 @@ describe("external-flow detection and normalization", () => {
     expect(record.rawEvent).toBeUndefined();
   });
 
-  test("redacts a real farmer identifier from the verified failure fixture", () => {
+  test("redacts a synthetic farmer identifier from the failure fixture", () => {
     const event = fixtureEvents(fixture.failure_example).find(
       (candidate) => candidate.edata.eks.event_name === "provider_web_request",
     );

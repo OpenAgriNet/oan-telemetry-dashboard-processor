@@ -1,5 +1,3 @@
-const { redactSensitiveData } = require('./externalFlowPii');
-
 class TelemetryMessageError extends Error {
   constructor() {
     super('Telemetry message must be valid JSON containing an events array');
@@ -61,13 +59,12 @@ function createTelemetryBatchProcessor({
         // copying an unparseable private payload into operational failure data.
         JSON.stringify(stage === 'parse'
           ? { raw_log_id: raw.id, reason: 'invalid telemetry message' }
-          : redactSensitiveData(event)),
+          : { raw_log_id: raw.id, raw_event_index: eventIndex, failure_code: code }),
         {
           raw_log_id: raw.id,
           raw_event_index: eventIndex,
           failure_stage: stage,
           failure_code: code,
-          source_meta: redactSensitiveData(raw.meta),
         },
         stage === 'parse' ? 'INVALID_TELEMETRY_MESSAGE' : event?.eid || 'INVALID_EVENT',
       ],
@@ -126,6 +123,11 @@ function createTelemetryBatchProcessor({
               if (outcome.duplicate) counts.duplicateEvents++;
               else counts.eventsProcessed++;
             } else {
+              if (outcome.errorCode && !isRecordError({ code: outcome.errorCode })) {
+                const error = new Error('External processing requires a batch retry');
+                error.code = outcome.errorCode;
+                throw error;
+              }
               await quarantine(client, raw, event, index + 1, 'external', 'EXTERNAL_EVENT_REJECTED');
               counts.deadLetterEvents++;
               counts.deadLetterCount++;

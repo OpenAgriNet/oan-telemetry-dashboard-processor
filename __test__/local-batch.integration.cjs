@@ -45,10 +45,14 @@ const tables = ['winston_logs', 'dead_letter_logs', 'questions', 'feedback', 'er
     // The copied BIGSERIAL default must not advance the restored public sequence.
     await connection.query('CREATE TEMP SEQUENCE audit_external_event_ids');
     await connection.query("ALTER TABLE pg_temp.external_api_events ALTER COLUMN id SET DEFAULT nextval('pg_temp.audit_external_event_ids')");
+    await connection.query('CREATE TEMP TABLE event_processors (LIKE public.event_processors INCLUDING ALL)');
+    await connection.query('CREATE TEMP SEQUENCE audit_rule_ids START 1000');
+    await connection.query("ALTER TABLE pg_temp.event_processors ALTER COLUMN id SET DEFAULT nextval('pg_temp.audit_rule_ids')");
+    await connection.query('INSERT INTO pg_temp.event_processors SELECT * FROM public.event_processors');
     const client = {
       async query(sql, values) {
         const isolated = sql.replace(/public\.(external_api_(?:traces|trace_aliases|events))/g, 'pg_temp.$1');
-        assert.ok(!/\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|ALTER\s+TABLE|TRUNCATE)\s+public\./i.test(isolated), 'Public writes are forbidden');
+        assert.ok(!/\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|ALTER\s+TABLE|CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|TRUNCATE)\s+public\./i.test(isolated), 'Public writes are forbidden');
         return connection.query(isolated, values);
       },
       release() {},
@@ -154,13 +158,41 @@ const tables = ['winston_logs', 'dead_letter_logs', 'questions', 'feedback', 'er
     const api = { eid: 'OE_ITEM_RESPONSE', mid: `AUDIT_API_${randomUUID()}`, ets: 1792150690444,
       edata: { eks: { trace_scope: 'beckn_external_api', event_name: 'provider_webservice_call',
         service: 'mh-provider-backend', layer: 'provider', http_call_id: randomUUID(),
-        endpoint: '/synthetic-local-api', method: 'POST', outcome: 'success', duration_ms: 20 } } };
+        endpoint: 'https://example.invalid/synthetic-local-api?api_key=SYNTHETIC_SECRET&farmer_id=SYNTHETIC_ID', method: 'POST', outcome: 'success', duration_ms: 20 } } };
     await add([{ eid: 'OE_START' }, api, api, { eid: 'OE_END' }]);
     const externalCounts = await run('external-repeat-counters');
     assert.equal(externalCounts.eventsProcessed, 1); assert.equal(externalCounts.duplicateEvents, 1);
     assert.equal(externalCounts.ignoredEvents, 2); assert.equal(externalCounts.eventsSeen, 4);
     assert.equal(Number((await connection.query('SELECT count(*) FROM pg_temp.external_api_events')).rows[0].count), 1);
     results.cases.external_repeat_counters = externalCounts;
+    const payloads = (await connection.query(`SELECT endpoint,request_payload IS NOT NULL AS request_present,
+      response_payload IS NOT NULL AS response_present,error_payload IS NOT NULL AS error_present FROM pg_temp.external_api_events`)).rows[0];
+    assert.equal(payloads.request_present, false);assert.equal(payloads.response_present, false);assert.equal(payloads.error_present, false);
+    assert.ok(!payloads.endpoint.includes('SYNTHETIC_SECRET'));assert.ok(!payloads.endpoint.includes('SYNTHETIC_ID'));
+    results.cases.missing_payload_flags_and_endpoint_masking = true;
+
+    await clear();api.mid = `AUDIT_MISSING_TABLE_${randomUUID()}`;await add([api]);
+    await connection.query('ALTER TABLE pg_temp.external_api_trace_aliases RENAME TO audit_hidden_aliases');
+    const unavailableExternal = await run('external-schema-unavailable');
+    await connection.query('ALTER TABLE pg_temp.audit_hidden_aliases RENAME TO external_api_trace_aliases');
+    assert.equal(unavailableExternal.status, 'error');assert.equal(unavailableExternal.deadLetterCount, 0);
+    assert.equal((await counts()).pending, 1);
+    results.cases.external_infrastructure_error_keeps_input_pending = true;
+
+    // Exercise real registration SQL against temporary configuration and target tables.
+    const registered = await registry.loadEventProcessors.registerEventProcessor('LOCAL_TEST_EVENT',
+      'errorDetails', { ets: 'ets' }, 'payload', localPool);
+    assert.equal(registered.success, true);
+    const changed = (await connection.query("SELECT table_name,event_type FROM pg_temp.event_processors WHERE LOWER(table_name)='errordetails'")).rows;
+    assert.equal(changed.length, 1);assert.equal(changed[0].table_name, 'errorDetails');
+    assert.equal(changed[0].event_type, 'LOCAL_TEST_EVENT');
+    assert.equal(registry.eventProcessors.length, mappings.length);
+    const publicRules = (await connection.query('SELECT * FROM public.event_processors WHERE is_active=true ORDER BY id')).rows;
+    assert.deepEqual(publicRules, mappings);
+    registry.eventProcessors.length = 0;
+    for (const mapping of mappings) registry._testing.registerProcessor(mapping.id, mapping.event_type,
+      mapping.table_name, mapping.field_mappings, mapping.field_verification);
+    results.cases.registration_preserves_existing_rule_identity = true;
 
     // Replay recent real dump deliveries into temporary reporting tables only.
     await clear();

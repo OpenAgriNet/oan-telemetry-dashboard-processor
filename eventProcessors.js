@@ -229,14 +229,13 @@ function registerProcessor(id, eventType, tableName, fieldMappings, fieldVerific
       // Execute the query
       await client.query(query, values);
       logger.debug(`Processed ${eventType} event into ${tableName} table`);
+      return { success: true };
     } catch (err) {
-      // Log the error with event details but skip this record instead of failing the batch
+      // The batch owns rollback and quarantine. Swallowing a SQL error here
+      // leaves PostgreSQL's transaction aborted and masks failed persistence.
       const eventMid = event?.mid || 'unknown';
-      const eventId = event?.edata?.eks?.target?.id || event?.object?.id || 'unknown';
-      logger.error(`Error processing ${eventType} event (mid: ${eventMid}, id: ${eventId}): ${err.message}`);
-      logger.error(`Skipping bad record. Event data: ${JSON.stringify(event).substring(0, 500)}...`);
-      // Don't throw - allow batch to continue processing other events
-      return { success: false, skipped: true, error: err.message };
+      logger.error(`Error processing ${eventType} event (mid: ${eventMid}, code: ${err.code || 'PROCESSING_ERROR'})`);
+      throw err;
     }
   };
   eventProcessors.push(eventProcessorsData);

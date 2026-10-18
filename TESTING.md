@@ -41,3 +41,18 @@ New external records mask sensitive URL parameters and use SQL NULL for absent
 payloads. These changes do not rewrite historical processed records or raw logs.
 
 Production behavior is not checked by these commands.
+
+## UUID primary-key migration
+
+Run `npm run test:row-ids` to verify the separate migration in
+`migrations/20261018_od3109_core_row_ids/`. This is a dedicated integration
+command: it creates a uniquely named loopback test database, copies only the
+14 October core records from mh-17-10 through a read-only source connection,
+and tests apply, complete/partial rollback, failed concurrent-index recovery,
+existing-data rejection, default UUID generation and a small processor replay.
+The original local dump is not modified. The copy is retained with the verified
+keys applied for inspection. If the sibling service checkout is available,
+12 controller/report responses are also compared before and after the migration;
+standalone processor checkouts still run all database and processor cases.
+The JSON report includes aggregate results only. This command does not apply
+anything to production or start HTTP servers, schedulers or notifications.

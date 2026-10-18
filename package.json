@@ -10,7 +10,8 @@
     "test:local-db": "node __test__/local-batch.integration.cjs",
     "test:management-api": "node __test__/management-api.integration.cjs",
     "lint": "eslint .",
-    "lint:fix": "eslint . --fix"
+    "lint:fix": "eslint . --fix",
+    "test:row-ids": "node __test__/row-id-migration.integration.cjs"
   },
   "dependencies": {
     "dotenv": "^16.3.1",

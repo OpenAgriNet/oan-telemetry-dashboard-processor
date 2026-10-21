@@ -19,6 +19,7 @@ const external = require('../externalFlowProcessor');
 const { redactSensitiveData } = require('../externalFlowPii');
 const { createTelemetryBatchProcessor } = require('../telemetryBatch');
 const logger = require('../logger');
+const { set, get } = require('lodash');
 const quiet = { debug() {}, info() {}, warn() {}, error() {} };
 const pool = new Pool({
   host: config.DB_HOST, port: Number(config.DB_PORT || 5432),
@@ -101,6 +102,39 @@ const tables = ['winston_logs', 'dead_letter_logs', 'questions', 'feedback', 'er
         questionText: 'Synthetic local question', answerText: { answer: 'Synthetic answer' }, questionSource: 'local-test',
       } } } },
     });
+
+    // Exercise feedback validation using the dump's real field mappings.
+    const feedbackMapping = mappings.find(mapping => mapping.table_name.toLowerCase() === 'feedback');
+    assert.ok(feedbackMapping);
+    const feedbackEvent = (rating, comment) => {
+      const event = { eid: feedbackMapping.event_type, mid: `AUDIT_FEEDBACK_${randomUUID()}` };
+      const data = { uid: 'synthetic-user', sid: 'synthetic-session', ets: 1792150690444,
+        feedbacktype: rating, feedbacktext: comment, questiontext: 'Synthetic question', answertext: 'Synthetic answer' };
+      for (const [field, fieldPath] of Object.entries(feedbackMapping.field_mappings)) {
+        if (Object.hasOwn(data, field.toLowerCase())) set(event, fieldPath, data[field.toLowerCase()]);
+      }
+      if (get(event, feedbackMapping.field_verification) === undefined) set(event, feedbackMapping.field_verification, {});
+      return event;
+    };
+    await clear();
+    const feedbackRawId = await add([
+      feedbackEvent('dislike', null), feedbackEvent('like', null),
+      feedbackEvent('dislike', ''), feedbackEvent('like', ''),
+      feedbackEvent('dislike', ' \t\n'), feedbackEvent('dislike', {}),
+      feedbackEvent('dislike', 'Incomplete answer'),
+    ]);
+    const feedbackResult = await run('feedback-comment-policy');
+    assert.equal(feedbackResult.status, 'success');
+    assert.equal(feedbackResult.eventsProcessed, 3);assert.equal(feedbackResult.deadLetterCount, 4);
+    const storedRatings = (await connection.query('SELECT feedbacktype, feedbacktext FROM pg_temp.feedback')).rows;
+    assert.equal(storedRatings.length, 3);
+    assert.equal(storedRatings.filter(row => row.feedbacktype === 'like').length, 2);
+    assert.equal(storedRatings.find(row => row.feedbacktype === 'dislike').feedbacktext, 'Incomplete answer');
+    const rejectedRatings = (await connection.query('SELECT meta FROM pg_temp.dead_letter_logs')).rows;
+    assert.ok(rejectedRatings.every(({meta}) => meta.failure_stage === 'validation'
+      && meta.failure_code === 'FEEDBACK_COMMENT_REQUIRED' && meta.raw_log_id === feedbackRawId));
+    assert.equal((await connection.query('SELECT sync_status FROM pg_temp.winston_logs WHERE id=$1', [feedbackRawId])).rows[0].sync_status, 1);
+    results.cases.feedback_comment_policy = { saved: 3, rejected: 4, rawRetained: true, validEventsNotRolledBack: true };
 
     // Reproduce the old behavior and compare it with the fix on the same schema.
     await clear(); await add([question('not-an-epoch'), question()]);
@@ -194,11 +228,13 @@ const tables = ['winston_logs', 'dead_letter_logs', 'questions', 'feedback', 'er
       mapping.table_name, mapping.field_mappings, mapping.field_verification);
     results.cases.registration_preserves_existing_rule_identity = true;
 
-    // Replay recent real dump deliveries into temporary reporting tables only.
+    // Replay a bounded sample from the approved October 14 IST dump day only.
     await clear();
     await connection.query(`INSERT INTO pg_temp.winston_logs(id,level,message,meta,"timestamp",sync_status)
       SELECT id,level,message,meta,"timestamp",0 FROM public.winston_logs WHERE sync_status=1
-      ORDER BY "timestamp" DESC,id DESC LIMIT 21310`);
+        AND "timestamp" >= TIMESTAMP '2026-10-13 18:30:00'
+        AND "timestamp" < TIMESTAMP '2026-10-14 18:30:00'
+      ORDER BY "timestamp" DESC,id DESC LIMIT 500`);
     const initial = Number((await connection.query('SELECT count(*) FROM pg_temp.winston_logs')).rows[0].count);
     assert.ok(initial > 0, 'Dump contains no raw deliveries');
     const totals = { processed: 0, eventsSeen: 0, eventsProcessed: 0, duplicateEvents: 0,
@@ -221,7 +257,9 @@ const tables = ['winston_logs', 'dead_letter_logs', 'questions', 'feedback', 'er
       (SELECT count(*)::int FROM pg_temp.errordetails) AS errors,
       (SELECT count(*)::int FROM pg_temp.external_api_events) AS external_events`)).rows[0];
     results.cases.restored_dump_replay = { inputLogs: initial, nonemptyBatches: batches - 1, counters: totals, reportingRows: reporting };
-    assert.equal(totals.deadLetterCount, 0, 'Unexpected failure record in previously processed real dump sample');
+    const unexpectedFailures = Number((await connection.query(`SELECT count(*) FROM pg_temp.dead_letter_logs
+      WHERE COALESCE(meta->>'failure_code','') <> 'FEEDBACK_COMMENT_REQUIRED'`)).rows[0].count);
+    assert.equal(unexpectedFailures, 0, 'Unexpected failure in the real dump sample');
     results.success = true;
   } catch (error) {
     results.success = false;results.error = { code: error.code || error.name, message: error.message };

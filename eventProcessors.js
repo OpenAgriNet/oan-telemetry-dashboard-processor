@@ -7,6 +7,7 @@
 const logger = require('./logger');
 const _ = require('lodash');
 const { quoteIdentifier, validateRegistration } = require('./processorConfig');
+const { validateFeedback } = require('./feedbackPolicy');
 
 // Event processor registry
 let eventProcessors = [];
@@ -170,6 +171,7 @@ function registerProcessor(id, eventType, tableName, fieldMappings, fieldVerific
       const fields = [];
       const values = [];
       const placeholders = [];
+      const mappedValues = {};
       let paramIndex = 1;
 
       function resolveValueForField(fieldName, mappingPath) {
@@ -223,11 +225,15 @@ function registerProcessor(id, eventType, tableName, fieldMappings, fieldVerific
         }
 
         // Ensure JSONB fields are sent as proper JSON values in SQL (pg driver handles JS objects)
+        mappedValues[field.toLowerCase()] = value;
         const isJsonField = ['registered_location', 'device_location', 'agristack_location', 'groupdetails', 'answertext'].includes(field.toLowerCase());
         values.push(isJsonField ? (value === null ? null : value) : ((typeof value === 'object' && value !== null) ? JSON.stringify(value) : value));
         placeholders.push(`$${paramIndex++}`);
       });
 
+      if (tableName.toLowerCase() === 'feedback') {
+        validateFeedback(mappedValues.feedbacktype, mappedValues.feedbacktext);
+      }
 
       // Construct the SQL query
       const query = `

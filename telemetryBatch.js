@@ -1,5 +1,3 @@
-const { FeedbackValidationError } = require('./feedbackPolicy');
-
 class TelemetryMessageError extends Error {
   constructor() {
     super('Telemetry message must be valid JSON containing an events array');
@@ -37,8 +35,7 @@ function isRecordError(error) {
   // Invalid values and constraint failures are specific to the current event.
   // Connection, permission, schema, timeout and transaction failures must retry
   // the batch rather than silently disposing of valid input.
-  return error instanceof FeedbackValidationError
-    || (typeof error.code === 'string' && /^(22|23)/.test(error.code));
+  return typeof error.code === 'string' && /^(22|23)/.test(error.code);
 }
 
 function createTelemetryBatchProcessor({
@@ -162,8 +159,7 @@ function createTelemetryBatchProcessor({
             if (!isRecordError(error)) throw error;
             await client.query('ROLLBACK TO SAVEPOINT generic_event');
             await client.query('RELEASE SAVEPOINT generic_event');
-            await quarantine(client, raw, event, index + 1,
-              error instanceof FeedbackValidationError ? 'validation' : 'persistence', error.code);
+            await quarantine(client, raw, event, index + 1, 'persistence', error.code);
             counts.deadLetterEvents++;
             counts.deadLetterCount++;
           }

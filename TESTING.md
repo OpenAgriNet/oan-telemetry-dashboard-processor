@@ -11,27 +11,13 @@ command reads local credentials from `.env`, refuses non-loopback hosts, and
 verifies the database/server address before work. Reporting, raw input,
 configuration and external traces are tested in connection-local temporary tables.
 Copied sequence defaults are redirected to temporary sequences. Restored public
-business tables are not modified. Up to 500 previously handled raw logs from
-14 October 2026 IST are replayed through the current mappings. No HTTP or scheduler starts.
+business tables are not modified. The latest 21,310 previously handled raw logs
+are replayed through the current mappings. No HTTP or scheduler starts.
 
 The regression checks compare the combined-branch batch with the fixed version,
 verify durable quarantine and retry behavior, reconcile outcome counters, retain
 the current generic repeated-delivery policy, check missing-payload flags and URL
 masking, and exercise registration against temporary configuration tables.
-
-## Feedback comments
-
-Likes may omit a comment. Dislikes require a nonblank text comment. This check
-uses the configured feedback field mappings before inserting a reporting row.
-An invalid dislike is recorded in `dead_letter_logs` with validation code
-`FEEDBACK_COMMENT_REQUIRED`; its raw log is retained and valid events in the same
-batch continue. The raw row is marked handled only after the batch commits.
-If recording the failure fails, the existing batch rollback/retry behavior applies.
-
-The local database check exercises mixed valid/invalid feedback using the dump's
-actual mappings. No database migration is required. The separate query service
-excludes historical invalid dislikes from reports without deleting them.
-The chatbot must also require a comment in its own feedback submission form.
 
 ## Management access
 

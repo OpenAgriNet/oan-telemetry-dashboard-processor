@@ -1,0 +1,22 @@
+{
+  "success_example": {
+    "captured_winston_logs": [{"telemetry_envelope": {"events": [
+      {"eid":"OE_ITEM_RESPONSE","mid":"synthetic-question","edata":{"eks":{"target":{"type":"Question"}}}},
+      {"eid":"OE_ITEM_RESPONSE","mid":"synthetic-round-trip","edata":{"eks":{"target":{"trace_scope":"beckn_external_api","event_name":"chatbot_round_trip"}}}},
+      {"eid":"OE_ITEM_RESPONSE","mid":"synthetic-provider-call","ets":1792150690444,"edata":{"eks":{
+        "trace_scope":"beckn_external_api","event_name":"provider_webservice_call",
+        "transaction_id":"synthetic-transaction","message_id":"synthetic-message","http_call_id":"synthetic-http",
+        "request_payload":{"latitude":20.741,"longitude":78.6}
+      }}}
+    ]}}]
+  },
+  "failure_example": {
+    "captured_winston_logs": [{"telemetry_envelope": {"events": [
+      {"eid":"OE_ITEM_RESPONSE","mid":"synthetic-failed-request","edata":{"eks":{
+        "trace_scope":"beckn_external_api","event_name":"provider_web_request",
+        "transaction_id":"synthetic-failed-transaction","http_call_id":"synthetic-failed-http",
+        "request_payload":{"farmer_id":"00000000000"}
+      }}}
+    ]}}]
+  }
+}

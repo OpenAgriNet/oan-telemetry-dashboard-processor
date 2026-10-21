@@ -1,5 +1,5 @@
 const logger = require("./logger");
-const { redactSensitiveData } = require("./externalFlowPii");
+const { redactSensitiveData, redactEndpoint } = require("./externalFlowPii");
 
 const EXTERNAL_TRACE_SCOPE = "beckn_external_api";
 
@@ -76,7 +76,7 @@ function normalizeExternalFlowEvent(event, source = {}) {
     stage: firstValue(eks.stage, target.stage),
     action: firstValue(eks.action, target.action),
     method: firstValue(eks.method, target.method),
-    endpoint: firstValue(eks.endpoint, eks.provider_endpoint, target.endpoint),
+    endpoint: redactEndpoint(firstValue(eks.endpoint, eks.provider_endpoint, target.endpoint)),
     outcome: firstValue(eks.outcome, target.outcome),
     httpStatus: toInteger(firstValue(eks.http_status, target.http_status)),
     responseStatus: firstValue(eks.response_status, target.response_status),
@@ -385,9 +385,10 @@ async function processExternalFlowEvent(client, event, source) {
       record.traceScope, record.traceSchemaVersion, record.questionId, record.sessionId, record.transactionId,
       record.messageId, record.httpCallId, record.dependencyOperationId, record.layer, record.service,
       record.dependency, record.stage, record.action, record.method, record.endpoint, record.outcome,
-      record.httpStatus, record.responseStatus, JSON.stringify(record.errorPayload), record.eventTime,
+      record.httpStatus, record.responseStatus, record.errorPayload === null ? null : JSON.stringify(record.errorPayload), record.eventTime,
       record.requestStartedAt, record.responseReceivedAt, record.durationMs, record.storedAt,
-      JSON.stringify(record.requestPayload), JSON.stringify(record.responsePayload), record.requestPayloadBytes,
+      record.requestPayload === null ? null : JSON.stringify(record.requestPayload),
+      record.responsePayload === null ? null : JSON.stringify(record.responsePayload), record.requestPayloadBytes,
       record.responsePayloadBytes, Boolean(record.responsePayloadTruncated), record.firstTokenMs,
       record.firstVisibleMs, record.firstAudioMs, record.totalMs, JSON.stringify(record.toolCalls),
     ];
@@ -415,8 +416,9 @@ async function processExternalFlowEvent(client, event, source) {
     return { processed: true, traceId };
   } catch (err) {
     await client.query("ROLLBACK TO SAVEPOINT external_flow_event");
-    logger.error(`External flow event processing failed (mid=${record.eventMid}): ${err.message}`);
-    return { processed: false, reason: err.message };
+    await client.query("RELEASE SAVEPOINT external_flow_event");
+    logger.error(`External flow event processing failed (mid=${record.eventMid}, code=${err.code || 'PROCESSING_ERROR'})`);
+    return { processed: false, reason: 'external event could not be saved', errorCode: err.code || 'PROCESSING_ERROR' };
   }
 }
 

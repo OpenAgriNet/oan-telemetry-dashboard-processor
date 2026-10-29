@@ -628,6 +628,43 @@ async function ensureTablesExist() {
       CREATE INDEX IF NOT EXISTS idx_bee_service ON public.beckn_ext_events(service_name)
     `);
 
+    // One row per external API call. beckn_ext_events keeps one row per
+    // (session_id, question_id), so several upstream calls made for the same
+    // question (e.g. PM-Kisan verify OTP -> user details -> beneficiary status)
+    // overwrite each other there; this table keeps every call for counting.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.ext_api_calls (
+        id                    BIGSERIAL PRIMARY KEY,
+        mid                   TEXT,
+        ets                   TIMESTAMPTZ NOT NULL,
+        channel               TEXT,
+        session_id            UUID,
+        question_id           UUID,
+        beckn_action          TEXT,
+        beckn_domain          TEXT,
+        beckn_transaction_id  TEXT,
+        api_service           TEXT,
+        method                TEXT,
+        url                   TEXT,
+        status_code           INT,
+        latency_ms            INT,
+        success               BOOLEAN,
+        outcome               TEXT,
+        error_type            TEXT,
+        error                 TEXT,
+        created_at            TIMESTAMPTZ DEFAULT now()
+      )
+    `);
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_eac_mid ON public.ext_api_calls(mid)
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_eac_ets ON public.ext_api_calls(ets)
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_eac_service_ets ON public.ext_api_calls(api_service, ets)
+    `);
+
     // Create generic UI interaction events table for OE_INTERACT telemetry
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.ui_interaction_events(
@@ -1778,8 +1815,66 @@ function classifyBecknNetworkPhase(event) {
  * Multiple events (START + EXT + BPP + END) merge into one row keyed by
  * (session_id, question_id).
  */
+/**
+ * Insert one row into ext_api_calls for an EXT_API event. Runs even when the
+ * event has no session/question UUIDs, so call counts don't depend on them.
+ * Re-processed events are ignored via the unique mid.
+ */
+async function insertExtApiCall(client, event, sessionId, questionId) {
+  const target = event.edata?.eks?.target || {};
+  const nad = target.networkApiDetails || {};
+  const inputObj = getNadInputObject(nad);
+  const beckn = inputObj.beckn || {};
+  const output = asJsonObject(nad.output);
+  const ets = asIntOrNull(event.ets) ?? Date.now();
+
+  await client.query("SAVEPOINT ext_api_call");
+  try {
+    await client.query(
+      `
+      INSERT INTO ext_api_calls (
+        mid, ets, channel, session_id, question_id,
+        beckn_action, beckn_domain, beckn_transaction_id,
+        api_service, method, url, status_code, latency_ms,
+        success, outcome, error_type, error
+      ) VALUES (
+        $1, to_timestamp($2::double precision / 1000.0), $3, $4, $5,
+        $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
+      )
+      ON CONFLICT (mid) DO NOTHING
+      `,
+      [
+        asTextOrNull(event.mid),
+        ets,
+        event.channel || null,
+        sessionId,
+        questionId,
+        asTextOrNull(beckn.action),
+        asTextOrNull(beckn.domain),
+        asTextOrNull(beckn.transaction_id),
+        asTextOrNull(nad.apiService || nad.service_name),
+        asTextOrNull(nad.method),
+        asTextOrNull(nad.url),
+        asIntOrNull(nad.statusCode),
+        asIntOrNull(nad.latencyMs),
+        typeof nad.success === "boolean" ? nad.success : null,
+        asTextOrNull(output.outcome),
+        asTextOrNull(output.errorType),
+        asTextOrNull(nad.error),
+      ],
+    );
+    await client.query("RELEASE SAVEPOINT ext_api_call");
+  } catch (err) {
+    await client.query("ROLLBACK TO SAVEPOINT ext_api_call");
+    logger.error(`insertExtApiCall failed mid=${event?.mid || ""}: ${err.message}`);
+  }
+}
+
 async function processBecknExtEvent(client, event) {
   const { sessionId, questionId } = getBecknLifecycleKeys(event);
+  if (classifyBecknNetworkPhase(event) === "EXT_API") {
+    await insertExtApiCall(client, event, sessionId, questionId);
+  }
   if (!sessionId || !questionId) {
     logger.warn(
       `processBecknExtEvent: missing session_id/question_id UUID, skipping eid=${event?.eid} type=${event?.edata?.eks?.type || ""} sid=${event?.sid || ""} qid=${event?.qid || ""}`,
@@ -4106,6 +4201,8 @@ module.exports = {
   parseTelemetryMessage,
   processVoiceResponse,
   runAppleDownloadsSync,
+  processBecknExtEvent,
+  insertExtApiCall,
 };
 
 // Only start server if this file is run directly (not when required in tests)

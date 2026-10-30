@@ -47,7 +47,16 @@ function createTelemetryBatchProcessor({
   batchSize = 10,
   logger = {},
 }) {
-  const log = { info() {}, warn() {}, error() {}, ...logger };
+  // Winston's level methods are inherited, so object spread loses them. Bind
+  // each method to its logger to preserve both prototype lookup and `this`.
+  const bindLogMethod = (level) => typeof logger?.[level] === 'function'
+    ? logger[level].bind(logger)
+    : () => {};
+  const log = {
+    info: bindLogMethod('info'),
+    warn: bindLogMethod('warn'),
+    error: bindLogMethod('error'),
+  };
 
   async function quarantine(client, raw, event, eventIndex, stage, code) {
     await client.query(

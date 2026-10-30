@@ -31,6 +31,36 @@ function harness(rows, options = {}) {
 }
 
 describe('durable telemetry batch outcomes', () => {
+  test('writes committed summaries and safe failures through a real Winston logger', async () => {
+    const { createLogger, transports } = require('winston');
+    const { Writable } = require('node:stream');
+    const messages = [];
+    const stream = new Writable({
+      write(chunk, encoding, callback) {
+        messages.push(String(chunk));
+        callback();
+      },
+    });
+    const logger = createLogger({ transports: [new transports.Stream({ stream })] });
+
+    try {
+      const saved = harness([raw([event()])], { logger });
+      expect(await saved.run('logging-success')).toMatchObject({ status: 'success', processed: 1 });
+      const failed = harness([raw([event()])], { logger });
+      failed.process.mockRejectedValueOnce(Object.assign(new Error('SYNTHETIC_PRIVATE_VALUE'), { code: '08006' }));
+      expect(await failed.run('logging-failure')).toMatchObject({ status: 'error', processed: 0 });
+      await new Promise(resolve => setImmediate(resolve));
+
+      const output = messages.join('');
+      expect(output).toContain('[logging-success] Committed telemetry outcomes:');
+      expect(output).toContain('[logging-failure] Telemetry batch failed (code=08006)');
+      expect(output).not.toContain('[logging-failure] Committed telemetry outcomes:');
+      expect(output).not.toContain('SYNTHETIC_PRIVATE_VALUE');
+    } finally {
+      logger.close();
+    }
+  });
+
   test('counts saved events, repeats, intentional ignores and failures separately', async () => {
     const external = jest.fn()
       .mockResolvedValueOnce({ processed: true })

@@ -12,6 +12,7 @@ const express = require("express");
 const { Pool } = require("pg");
 const cron = require("node-cron");
 const dotenv = require("dotenv");
+dotenv.config();
 const logger = require("./logger");
 const { spawn } = require("child_process");
 
@@ -20,11 +21,19 @@ const {
   loadEventProcessors,
   getNestedValue,
 } = require("./eventProcessors");
+const {
+  ensureExternalFlowSchema,
+  isExternalFlowEvent,
+  processExternalFlowEvent,
+} = require("./externalFlowProcessor");
+const { redactSensitiveData } = require("./externalFlowPii");
 const { forEach } = require("lodash");
+const { requireManagementAuth } = require('./managementAuth');
 
 let isShuttingDown = false;
 let server; // HTTP server reference
 
+if (require.main === module) {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
@@ -37,13 +46,12 @@ process.on('unhandledRejection', (reason) => {
   logger.error('[FATAL] Unhandled Promise Rejection', reason);
   process.exit(1); // immediate
 });
-
-// Load environment variables from .env file
-dotenv.config();
+}
 
 // Create Express application
 const app = express();
 app.use(express.json());
+app.use('/api', requireManagementAuth);
 
 const pool = new Pool({
   user: process.env.DB_USER,
@@ -154,6 +162,9 @@ const MV_REFRESH_SCHEDULE = process.env.MV_REFRESH_SCHEDULE || "*/15 * * * *"; /
 async function ensureTablesExist() {
   const client = await pool.connect();
   try {
+    // External-flow tables are isolated from existing question/feedback/error processing.
+    await ensureExternalFlowSchema(client);
+
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.dead_letter_logs (
         level character varying COLLATE pg_catalog."default",
@@ -583,250 +594,18 @@ async function ensureTablesExist() {
   }
 }
 
-// Parse telemetry message JSON
-function parseTelemetryMessage(message, batchId = "", logIndex = 0) {
-  try {
-    logger.debug(
-      `[${batchId}] [Log ${logIndex}] Parsing telemetry message (length: ${message?.length || 0} chars)`,
-    );
-    // Parse the message string which is a JSON string
-    const parsedMessage = JSON.parse(message);
-    // Return the events array from the parsed message
-    const events = parsedMessage.events || [];
-    logger.debug(
-      `[${batchId}] [Log ${logIndex}] Successfully parsed message, found ${events.length} events`,
-    );
-    return events;
-  } catch (err) {
-    const messagePreview = message?.substring(0, 100) || "empty";
-    logger.error(
-      `[${batchId}] [Log ${logIndex}] Error parsing telemetry message: ${err.message}`,
-    );
-    logger.error(
-      `[${batchId}] [Log ${logIndex}] Message preview: ${messagePreview}...`,
-    );
-    return [];
-  }
-}
-
-// Process telemetry logs
-async function processTelemetryLogs(batchId = `batch_${Date.now()}`) {
-  logger.info(`[${batchId}] Step 1: Acquiring database connection...`);
-  const client = await pool.connect();
-  logger.info(`[${batchId}] Step 1: Database connection acquired`);
-
-  let processedCount = 0;
-  let totalEventsProcessed = 0;
-  let deadLetterCount = 0;
-
-  try {
-    // Begin transaction
-    logger.info(`[${batchId}] Step 2: Beginning database transaction...`);
-    await client.query("BEGIN");
-    logger.info(`[${batchId}] Step 2: Transaction started`);
-
-    // Get unprocessed logs
-    logger.info(
-      `[${batchId}] Step 3: Fetching unprocessed logs (BATCH_SIZE: ${BATCH_SIZE})...`,
-    );
-    const queryStartTime = Date.now();
-    const result = await client.query(
-      `SELECT id, level, message, meta, cast(to_char(("timestamp")::TIMESTAMP,'yyyymmddhhmiss') as BigInt) as timestamp, sync_status FROM winston_logs 
-       WHERE sync_status = 0 
-       ORDER BY "timestamp" ASC 
-       LIMIT $1`,
-      [BATCH_SIZE],
-    );
-    const queryDuration = Date.now() - queryStartTime;
-    logger.info(
-      `[${batchId}] Step 3: Query completed in ${queryDuration}ms, found ${result.rows.length} logs`,
-    );
-
-    if (result.rows.length === 0) {
-      logger.info(
-        `[${batchId}] Step 4: No new telemetry logs to process - committing empty transaction`,
-      );
-      await client.query("COMMIT");
-      logger.info(`[${batchId}] Step 4: Empty transaction committed`);
-      return { processed: 0, status: "success" };
-    }
-
-    logger.info(
-      `[${batchId}] Step 4: Starting to process ${result.rows.length} telemetry logs`,
-    );
-
-    // Process each log
-    for (let logIndex = 0; logIndex < result.rows.length; logIndex++) {
-      const log = result.rows[logIndex];
-      const logStartTime = Date.now();
-      logger.info(
-        `[${batchId}] [Log ${logIndex + 1}/${result.rows.length}] Processing log (timestamp: ${log.timestamp}, level: ${log.level})`,
-      );
-
-      const events = parseTelemetryMessage(log.message, batchId, logIndex + 1);
-      logger.info(
-        `[${batchId}] [Log ${logIndex + 1}] Parsed ${events.length} events from message`,
-      );
-
-      if (events.length === 0) {
-        logger.warn(
-          `[${batchId}] [Log ${logIndex + 1}] No events found in message - skipping to sync status update`,
-        );
-      }
-
-      for (let eventIndex = 0; eventIndex < events.length; eventIndex++) {
-        const event = events[eventIndex];
-        const eventType = event.eid;
-        const eventUid = event.uid || "unknown";
-        const eventMid = event.mid || "unknown";
-        logger.debug(
-          `[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}/${events.length}] Processing event type: ${eventType}, uid: ${eventUid}, mid: ${eventMid}`,
-        );
-
-        let eventProcessed = false;
-        let matchedProcessor = null;
-
-        for (const key in eventProcessors) {
-          const processor = eventProcessors[key];
-          const verified = getNestedValue(
-            event,
-            processor["fieldVerification"],
-          );
-
-          logger.debug(
-            `[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] Checking processor '${key}': eventType match=${processor["eventType"] === eventType}, verified=${verified !== undefined}`,
-          );
-
-          if (
-            processor["eventType"] === eventType &&
-            verified !== undefined &&
-            !eventProcessed
-          ) {
-            matchedProcessor = key;
-            logger.info(
-              `[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] mid: ${eventMid} - Matched processor '${key}' for event type '${eventType}'`,
-            );
-
-            // const processorStartTime = Date.now();
-            // await processor["process"](client, event);
-            // const processorDuration = Date.now() - processorStartTime;
-
-            // logger.info(
-            //   `[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] mid: ${eventMid} - Processor '${key}' completed in ${processorDuration}ms`,
-            // );
-            // eventProcessed = true;
-            // totalEventsProcessed++;
-            // break;
-
-            const processorStartTime = Date.now();
-
-            try {
-              await processor["process"](client, event);
-
-              const processorDuration = Date.now() - processorStartTime;
-              logger.info(
-                `[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] mid: ${eventMid} - Processor '${key}' completed in ${processorDuration}ms`,
-              );
-
-              eventProcessed = true;
-              totalEventsProcessed++;
-            } catch (err) {
-              logger.error(
-                `[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] mid: ${eventMid} - Processor '${key}' failed: ${err.message}`,
-              );
-
-              await client.query(
-                `INSERT INTO dead_letter_logs(level, message, meta, event_name)
-     VALUES ($1, $2, $3, $4)`,
-                [log.level, JSON.stringify(event), log.meta, eventType],
-              );
-
-              deadLetterCount++;
-              eventProcessed = true; // IMPORTANT: mark as handled
-            }
-
-            break;
-          }
-        }
-
-        if (
-          eventType !== "OE_END" &&
-          eventType !== "OE_START" &&
-          eventProcessed === false
-        ) {
-          logger.warn(
-            `[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] mid: ${eventMid} - No processor matched for event type: ${eventType} - sending to dead letter queue`,
-          );
-          logger.debug(
-            `[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] mid: ${eventMid} - Dead letter event uid: ${eventUid}, channel: ${event.channel || "unknown"}`,
-          );
-
-          await client.query(
-            `Insert into dead_letter_logs(level, message, meta, event_name) values ($1, $2, $3, $4)`,
-            [log.level, JSON.stringify(event), log.meta, eventType],
-          );
-          deadLetterCount++;
-          logger.info(
-            `[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] Event inserted into dead_letter_logs`,
-          );
-        } else if (eventType === "OE_END" || eventType === "OE_START") {
-          logger.debug(
-            `[${batchId}] [Log ${logIndex + 1}] [Event ${eventIndex + 1}] Skipping system event type: ${eventType}`,
-          );
-        }
-      }
-
-      // Update sync status for processed log
-      logger.debug(
-        `[${batchId}] [Log ${logIndex + 1}] Updating sync_status to 1 for processed log...`,
-      );
-      await client.query(
-        `UPDATE winston_logs SET sync_status = 1 WHERE id = $1`,
-        [log.id],
-      );
-
-      const logDuration = Date.now() - logStartTime;
-      processedCount++;
-      logger.info(
-        `[${batchId}] [Log ${logIndex + 1}] Log processing completed in ${logDuration}ms, sync_status updated`,
-      );
-    }
-
-    // Commit transaction
-    logger.info(`[${batchId}] Step 5: Committing transaction...`);
-    await client.query("COMMIT");
-    logger.info(`[${batchId}] Step 5: Transaction committed successfully`);
-
-    logger.info(`[${batchId}] ========== PROCESSING SUMMARY ==========`);
-    logger.info(`[${batchId}] Logs processed: ${processedCount}`);
-    logger.info(`[${batchId}] Total events processed: ${totalEventsProcessed}`);
-    logger.info(`[${batchId}] Dead letter events: ${deadLetterCount}`);
-    logger.info(`[${batchId}] ==========================================`);
-
-    return {
-      processed: result.rows.length,
-      status: "success",
-      eventsProcessed: totalEventsProcessed,
-      deadLetterCount,
-    };
-  } catch (err) {
-    logger.error(
-      `[${batchId}] Step ERROR: Rolling back transaction due to error...`,
-    );
-    await client.query("ROLLBACK");
-    logger.error(`[${batchId}] Step ERROR: Transaction rolled back`);
-    logger.error(`[${batchId}] Error details: ${err.message}`);
-    logger.error(`[${batchId}] Error stack: ${err.stack}`);
-    logger.error(
-      `[${batchId}] Processed before error: ${processedCount} logs, ${totalEventsProcessed} events`,
-    );
-    return { processed: 0, status: "error", error: err.message };
-  } finally {
-    logger.info(`[${batchId}] Step FINAL: Releasing database connection...`);
-    client.release();
-    logger.info(`[${batchId}] Step FINAL: Database connection released`);
-  }
-}
+// Batch processing is constructed without starting jobs, so failure handling can
+// be tested against isolated dependencies and a local database.
+const { createTelemetryBatchProcessor, parseTelemetryMessage } = require("./telemetryBatch");
+const processTelemetryLogs = createTelemetryBatchProcessor({
+  pool,
+  eventProcessors,
+  getNestedValue,
+  isExternalFlowEvent,
+  processExternalFlowEvent,
+  batchSize: BATCH_SIZE,
+  logger,
+});
 
 // question
 // Process OE_ITEM_RESPONSE data
@@ -972,7 +751,7 @@ let isProcessingLogs = false;
 let currentBatchId = null;
 
 // Schedule telemetry processing with configurable cron schedule
-cron.schedule(CRON_SCHEDULE, async () => {
+if (require.main === module) cron.schedule(CRON_SCHEDULE, async () => {
   if (isShuttingDown) {
     logger.warn('[CRON] Skipping run — application shutting down');
     return;
@@ -999,6 +778,10 @@ cron.schedule(CRON_SCHEDULE, async () => {
 
   try {
     const result = await processTelemetryLogs(batchId);
+    if (result.status !== 'success') {
+      logger.error(`[${batchId}] Scheduled batch was not committed (code=${result.errorCode})`);
+      return;
+    }
     const duration = Date.now() - cronStartTime;
     logger.info(`[${batchId}] ========== CRON JOB COMPLETED ==========`);
     logger.info(
@@ -1033,6 +816,7 @@ app.post("/api/process-logs", async (req, res) => {
   logger.info(`[${batchId}] Manual trigger received via API`);
   try {
     const result = await processTelemetryLogs(batchId);
+    if (result.status !== 'success') return res.status(500).json(result);
     logger.info(`[${batchId}] Manual trigger completed successfully`);
     res.status(200).json({
       message: "Telemetry log processing triggered successfully",
@@ -1054,8 +838,9 @@ app.post("/api/process-logs", async (req, res) => {
 
 // API endpoint to get configured event processors
 app.get("/api/event-processors", (req, res) => {
-  const processors = Object.keys(eventProcessors).map((eventType) => ({
-    eventType,
+  const processors = eventProcessors.filter(Boolean).map((processor) => ({
+    eventType: processor.eventType,
+    tableName: processor.tableName,
     isActive: true,
   }));
 
@@ -1070,7 +855,7 @@ app.post("/api/event-processors", async (req, res) => {
     if (!eventType || !tableName || !fieldMappings || !fieldVerification) {
       return res.status(400).json({
         error:
-          "Missing required parameters: eventType, tableName, and fieldMappings are required",
+          "Missing required parameters: eventType, tableName, fieldMappings and fieldVerification are required",
       });
     }
 
@@ -1079,6 +864,8 @@ app.post("/api/event-processors", async (req, res) => {
       eventType,
       tableName,
       fieldMappings,
+      fieldVerification,
+      pool,
     );
 
     res.status(201).json({
@@ -1088,10 +875,9 @@ app.post("/api/event-processors", async (req, res) => {
       ...result,
     });
   } catch (err) {
-    logger.error("Error registering event processor:", err);
-    res.status(500).json({
-      error: "Failed to register event processor",
-      details: err.message,
+    logger.error(`Error registering event processor (code=${err.code || 'PROCESSING_ERROR'})`);
+    res.status(err.status || 500).json({
+      error: err.status ? err.message : 'Failed to register event processor',
     });
   }
 });
@@ -1211,7 +997,7 @@ async function refreshLeaderboardAggregation() {
 }
 
 // Schedule leaderboard refresh job to run at 1 AM daily
-cron.schedule(LEADERBOARD_REFRESH_SCHEDULE, async () => {
+if (require.main === module) cron.schedule(LEADERBOARD_REFRESH_SCHEDULE, async () => {
   logger.info(
     `Running scheduled leaderboard refresh (${LEADERBOARD_REFRESH_SCHEDULE})`,
   );
@@ -1318,7 +1104,7 @@ async function refreshMaterializedViews() {
 }
 
 // Schedule materialized view refresh every 15 minutes
-cron.schedule(MV_REFRESH_SCHEDULE, async () => {
+if (require.main === module) cron.schedule(MV_REFRESH_SCHEDULE, async () => {
   if (isShuttingDown) {
     logger.warn('[MV_REFRESH] Skipping run — application shutting down');
     return;
@@ -1473,6 +1259,7 @@ async function shutdown(reason) {
 // Export for testing
 module.exports = {
   app,
+  pool,
   startServer,
   processTelemetryLogs,
   ensureTablesExist,
@@ -1483,5 +1270,3 @@ module.exports = {
 if (require.main === module) {
   startServer();
 }
-
-module.exports = { app, pool };

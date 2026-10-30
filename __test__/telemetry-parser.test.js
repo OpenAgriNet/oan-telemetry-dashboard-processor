@@ -1,21 +1,4 @@
-const { parseTelemetryMessage } = require('../index');
-
-jest.mock('../logger', () => ({
-  info: jest.fn(),
-  error: jest.fn(),
-  debug: jest.fn()
-}));
-
-jest.mock('../eventProcessors', () => ({
-  eventProcessors: {
-    'OE_ITEM_RESPONSE': jest.fn(),
-    'Feedback': jest.fn()
-  },
-  loadEventProcessors: {
-    loadFromDatabase: jest.fn(),
-    registerEventProcessor: jest.fn()
-  }
-}));
+const { parseTelemetryMessage } = require('../telemetryBatch');
 
 describe('Telemetry Log Processor', () => {
   describe('parseTelemetryMessage function', () => {
@@ -35,25 +18,23 @@ describe('Telemetry Log Processor', () => {
       expect(result[1].eid).toBe('OE_ITEM_RESPONSE');
     });
 
-    test('should return empty array for message without events', () => {
+    test('rejects messages without an events array', () => {
       const message = JSON.stringify({
         id: 'ekstep.telemetry',
         ver: '2.2'
       });
       
-      const result = parseTelemetryMessage(message);
-      expect(result).toEqual([]);
+      expect(() => parseTelemetryMessage(message)).toThrow('events array');
     });
 
-    test('should return empty array for invalid JSON message', () => {
+    test('rejects invalid JSON instead of treating it as an empty message', () => {
       const message = 'Not a valid JSON';
-      const result = parseTelemetryMessage(message);
-      expect(result).toEqual([]);
+      expect(() => parseTelemetryMessage(message)).toThrow('valid JSON');
     });
 
-    test('should return empty array for null or undefined message', () => {
-      expect(parseTelemetryMessage(null)).toEqual([]);
-      expect(parseTelemetryMessage(undefined)).toEqual([]);
+    test('rejects missing messages', () => {
+      expect(() => parseTelemetryMessage(null)).toThrow('valid JSON');
+      expect(() => parseTelemetryMessage(undefined)).toThrow('valid JSON');
     });
   });
 

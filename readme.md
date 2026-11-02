@@ -2,6 +2,27 @@
 
 A NodeJS microservice that processes telemetry logs from a PostgreSQL database, extracts configurable event types, and stores them in appropriate tables.
 
+## Voice Service Check telemetry
+
+Voice chat-completion request outcomes arrive as `OE_ITEM_RESPONSE` events with
+`edata.eks.target.networkApiDetails.apiType = "VOICE_API"` and
+`apiService = "voice_chat_completions"`. They use the existing `ext_api_calls`
+table and its unique `mid` index, so telemetry retries do not duplicate counts.
+These requests do not create Beckn lifecycle rows or require Beckn session or
+question IDs. Failed inserts are logged and reported as unprocessed.
+
+The voice producer emits one event after each response or interrupted stream,
+with `success`, `statusCode`, `latencyMs`, and `output.outcome` (`success`,
+`rejected`, or `error`). The `BharatVistaar-voice` channel supplies dashboard state
+filtering. Existing `OE_VOICE_RESPONSE` call/message processing is unchanged.
+
+Deploy this processor before the updated voice API. No new table or migration
+is required; historical voice turns do not supply request-outcome counts.
+
+```sh
+node --test __test__/voice-service-check.test.js
+```
+
 ## Features
 
 - Processes telemetry logs from the `winston_logs` table in PostgreSQL

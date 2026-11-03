@@ -1864,15 +1864,21 @@ async function insertExtApiCall(client, event, sessionId, questionId) {
       ],
     );
     await client.query("RELEASE SAVEPOINT ext_api_call");
+    return true;
   } catch (err) {
     await client.query("ROLLBACK TO SAVEPOINT ext_api_call");
     logger.error(`insertExtApiCall failed mid=${event?.mid || ""}: ${err.message}`);
+    return false;
   }
 }
 
 async function processBecknExtEvent(client, event) {
   const { sessionId, questionId } = getBecknLifecycleKeys(event);
   if (classifyBecknNetworkPhase(event) === "EXT_API") {
+    // Ignore sibling Beckn IDs: each Voice request is counted by its own event mid.
+    if (event.edata?.eks?.target?.networkApiDetails?.apiType === "VOICE_API") {
+      return insertExtApiCall(client, event, null, null);
+    }
     await insertExtApiCall(client, event, sessionId, questionId);
   }
   if (!sessionId || !questionId) {
